@@ -47,6 +47,22 @@ from backend.data_sources import (
     DataFusionEngine,
     DataSourcesService
 )
+from backend.action_centre import (
+    get_action_store,
+    generate_actions_from_climate_risk,
+    generate_actions_from_interventions,
+    generate_rule_based_recommendations,
+    build_action_centre_dashboard,
+    get_prioritized_actions,
+    get_ward_wise_action_summary,
+    evaluate_risk_data_freshness,
+    DEFAULT_RECOMMENDATION_THRESHOLDS,
+    RULE_DEFINITIONS,
+    ACTION_RESOURCE_ESTIMATES,
+    ACTION_TYPES,
+    VALID_STATUSES,
+    HUMAN_APPROVAL_NOTICE as ACTION_CENTRE_ADVISORY,
+)
 
 app = FastAPI(
     title="ClimateShield API - Ahmedabad Heat Decision Support",
@@ -99,7 +115,13 @@ def read_root():
             "/api/interventions/simulate",
             "/api/data-sources/era5",
             "/api/data-sources/ecostress",
-            "/api/data-sources/fusion"
+            "/api/data-sources/fusion",
+            "/api/action-centre/dashboard",
+            "/api/action-centre/actions",
+            "/api/action-centre/actions/{action_id}",
+            "/api/action-centre/actions/{action_id}/status",
+            "/api/action-centre/generate-from-risk",
+            "/api/action-centre/generate-from-interventions"
         ]
     }
 
@@ -1029,5 +1051,375 @@ async def optimize_from_fused_data(req: FusedOptimizationRequest):
         return plan
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Fused optimization error: {str(e)}")
+
+
+# -------------------------------------------------------------
+# ACTION CENTRE ENDPOINTS
+# -------------------------------------------------------------
+
+class ActionStatusUpdateRequest(BaseModel):
+    new_status: str = Field(..., description=f"Target status. Must be one of: {VALID_STATUSES}")
+    changed_by: str = Field("operator", description="Identity of the person/system making the change")
+    notes: Optional[str] = Field(None, description="Optional notes about the status change")
+
+
+class ManualActionRequest(BaseModel):
+    ward_id: str = Field(..., description="Ward identifier (e.g. W1, W7)")
+    ward_name: str = Field("", description="Ward display name")
+    action_type: str = Field(..., description=f"Action type. Must be one of: {ACTION_TYPES}")
+    priority: str = Field("medium", description="Priority level: critical, high, medium, low")
+    reason: str = Field(..., description="Why this action is recommended")
+    required_resources: Optional[Dict[str, Any]] = Field(None, description="Resource requirements")
+    related_hazard: Optional[str] = Field(None, description="Related hazard: heat, waterlogging, water_shortage")
+    risk_score: Optional[float] = Field(None, ge=0.0, le=100.0, description="Associated risk score 0-100")
+
+
+class RecommendationRequest(BaseModel):
+    scenario_id: Optional[str] = Field(None, description="Optional climate demo scenario ID")
+    available_budget_inr: Optional[float] = Field(None, ge=0.0, description="Municipal budget ceiling in INR")
+    available_crew: Optional[int] = Field(None, ge=0, description="Available emergency staff / crew count")
+    available_water_l: Optional[float] = Field(None, ge=0.0, description="Available emergency water cap in Liters")
+    threshold_overrides: Optional[Dict[str, float]] = Field(None, description="Custom rule threshold overrides")
+    persist_to_store: bool = Field(True, description="Whether to persist generated recommendations into the Action Store")
+    enforce_resource_constraints: bool = Field(True, description="Whether to filter out actions exceeding available resources")
+
+
+@app.get("/api/action-centre/dashboard")
+async def get_action_centre_dashboard(
+    scenario_id: Optional[str] = Query(None, description="Optional climate demo scenario ID"),
+    force_refresh: bool = Query(False, description="Force fresh climate risk evaluation")
+):
+    """
+    Returns the unified Action Centre dashboard:
+    - High-risk Ahmedabad wards (combined score >= 50.0) with contributing heat & water factors.
+    - Overall action summary by operational status (proposed, approved, in_progress, completed, cancelled).
+    - Ward-wise action aggregation correlating active dispatches with risk profiles.
+    - Prioritized action queue sorted by risk severity, urgency, and recency.
+    - Data freshness & staleness indicator (safely falls back if risk engine is temporarily offline).
+    """
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk(
+            scenario_id=scenario_id,
+            force_refresh=force_refresh
+        )
+        data_quality = climate_data.get("data_quality_and_confidence", None)
+    except Exception as e:
+        # Graceful fallback: Action Centre operates in decoupled store-only mode if risk engine is unavailable
+        climate_data = None
+        data_quality = {
+            "status": "UNAVAILABLE",
+            "warning": f"Risk assessment engine temporarily unavailable: {str(e)}",
+            "fallback_mode": "STORE_ONLY",
+        }
+
+    dashboard = build_action_centre_dashboard(
+        climate_risk_data=climate_data,
+        data_quality=data_quality,
+    )
+    return dashboard
+
+
+@app.get("/api/action-centre/actions/prioritized")
+def list_prioritized_actions(
+    ward_id: Optional[str] = Query(None, description="Optional filter by ward ID or name"),
+    action_type: Optional[str] = Query(None, description="Optional filter by action type"),
+    status: Optional[str] = Query(None, description="Optional filter by status"),
+    limit: int = Query(50, ge=1, le=500, description="Maximum number of prioritized actions to return")
+):
+    """
+    Returns an operational queue of actions sorted strictly by decision priority:
+    1. Priority level: critical > high > medium > low
+    2. Status urgency: in_progress > approved > proposed > completed > cancelled
+    3. Associated risk score descending
+    4. Creation recency
+    """
+    if status and status not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status filter '{status}'. Must be one of: {VALID_STATUSES}"
+        )
+    if action_type and action_type not in ACTION_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid action_type filter '{action_type}'. Must be one of: {ACTION_TYPES}"
+        )
+
+    store = get_action_store()
+    actions = get_prioritized_actions(
+        store=store,
+        ward_id=ward_id,
+        action_type=action_type,
+        status=status,
+        limit=limit,
+    )
+    return {
+        "status": "SUCCESS",
+        "total_actions": len(actions),
+        "limit": limit,
+        "filters_applied": {
+            "ward_id": ward_id,
+            "action_type": action_type,
+            "status": status,
+        },
+        "prioritized_actions": actions,
+        "advisory": ACTION_CENTRE_ADVISORY,
+    }
+
+
+@app.get("/api/action-centre/actions/ward-summary")
+async def get_ward_action_summary_endpoint(
+    scenario_id: Optional[str] = Query(None, description="Optional climate demo scenario ID to correlate risk scores")
+):
+    """
+    Returns a ward-wise aggregation of all actions in the Action Centre.
+    Correlates active actions with each ward's combined risk profile,
+    reporting active action count, breakdown by status, and highest priority.
+    """
+    climate_data = None
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk(
+            scenario_id=scenario_id
+        )
+    except Exception:
+        climate_data = None
+
+    store = get_action_store()
+    summaries = get_ward_wise_action_summary(
+        store=store,
+        climate_risk_data=climate_data,
+    )
+    return {
+        "status": "SUCCESS",
+        "total_wards_with_actions": len(summaries),
+        "ward_summaries": summaries,
+        "climate_risk_correlated": climate_data is not None,
+        "advisory": ACTION_CENTRE_ADVISORY,
+    }
+
+
+@app.get("/api/action-centre/actions")
+def list_action_centre_actions(
+    ward_id: Optional[str] = Query(None, description="Filter by ward ID or name"),
+    action_type: Optional[str] = Query(None, description=f"Filter by action type"),
+    status: Optional[str] = Query(None, description=f"Filter by status")
+):
+    """
+    Lists all Action Centre actions with optional filters by ward, type, or status.
+    """
+    if status and status not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status filter '{status}'. Must be one of: {VALID_STATUSES}"
+        )
+    if action_type and action_type not in ACTION_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid action_type filter '{action_type}'. Must be one of: {ACTION_TYPES}"
+        )
+
+    store = get_action_store()
+    actions = store.list_actions(ward_id=ward_id, action_type=action_type, status=status)
+    return {
+        "status": "SUCCESS",
+        "total_actions": len(actions),
+        "filters_applied": {
+            "ward_id": ward_id,
+            "action_type": action_type,
+            "status": status,
+        },
+        "actions": actions,
+        "advisory": ACTION_CENTRE_ADVISORY,
+    }
+
+
+@app.get("/api/action-centre/actions/{action_id}")
+def get_action_centre_action(action_id: str):
+    """
+    Retrieves a single action record by its ID, including full status history.
+    """
+    store = get_action_store()
+    action = store.get_action(action_id)
+    if not action:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Action '{action_id}' not found in the Action Centre."
+        )
+    return {"status": "SUCCESS", "action": action}
+
+
+@app.put("/api/action-centre/actions/{action_id}/status")
+def update_action_status(action_id: str, req: ActionStatusUpdateRequest):
+    """
+    Updates the status of an existing action. Enforces valid state transitions:
+    proposed → approved → in_progress → completed
+    Any non-terminal state → cancelled
+    """
+    store = get_action_store()
+    try:
+        updated = store.update_status(
+            action_id=action_id,
+            new_status=req.new_status,
+            changed_by=req.changed_by,
+            notes=req.notes,
+        )
+        return {"status": "SUCCESS", "action": updated}
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Action '{action_id}' not found in the Action Centre."
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/api/action-centre/create")
+def create_manual_action(req: ManualActionRequest):
+    """
+    Manually creates a new action record in the Action Centre.
+    """
+    store = get_action_store()
+    try:
+        action = store.create_action(
+            ward_id=req.ward_id,
+            ward_name=req.ward_name,
+            action_type=req.action_type,
+            priority=req.priority,
+            reason=req.reason,
+            required_resources=req.required_resources,
+            related_hazard=req.related_hazard,
+            risk_score=req.risk_score,
+            source="manual",
+        )
+        return {"status": "SUCCESS", "action": action}
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/api/action-centre/generate-from-risk")
+async def generate_actions_from_risk_endpoint(
+    scenario_id: Optional[str] = Query(None, description="Optional climate demo scenario ID")
+):
+    """
+    Reads existing Combined Climate Risk Engine output and generates proposed
+    heat-alert actions for high-risk wards. Does NOT recalculate risk.
+    """
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk(
+            scenario_id=scenario_id
+        )
+        result = generate_actions_from_climate_risk(climate_data)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate actions from climate risk: {str(e)}"
+        )
+
+
+@app.post("/api/action-centre/generate-from-interventions")
+async def generate_actions_from_interventions_endpoint(
+    scenario_id: Optional[str] = Query(None, description="Optional climate demo scenario ID"),
+    total_budget_inr: float = Query(500000.0, ge=10000, le=10000000),
+    total_crew_members: int = Query(40, ge=1, le=500),
+    total_water_cap_l: float = Query(30000.0, ge=1000, le=500000),
+    equity_slider: float = Query(0.5, ge=0.0, le=1.0)
+):
+    """
+    Reads existing Intervention Engine output and creates trackable actions.
+    Uses cached/fresh combined climate risk to produce the intervention plan,
+    then converts dispatch items into Action Centre records.
+    """
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk(
+            scenario_id=scenario_id
+        )
+        wards_to_use = climate_data.get("ranked_wards", climate_data.get("wards", []))
+
+        plan = generate_intervention_recommendations(
+            wards=wards_to_use,
+            total_budget_inr=total_budget_inr,
+            total_crew_members=total_crew_members,
+            total_water_cap_l=total_water_cap_l,
+            equity_slider=equity_slider,
+        )
+        result = generate_actions_from_interventions(plan)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate actions from interventions: {str(e)}"
+        )
+
+
+@app.get("/api/action-centre/metadata")
+def get_action_centre_metadata():
+    """
+    Returns Action Centre configuration metadata: supported action types,
+    valid statuses, and status transition rules.
+    """
+    from backend.action_centre import VALID_STATUS_TRANSITIONS
+    return {
+        "status": "SUCCESS",
+        "action_types": ACTION_TYPES,
+        "valid_statuses": VALID_STATUSES,
+        "status_transitions": {
+            k: sorted(v) for k, v in VALID_STATUS_TRANSITIONS.items()
+        },
+        "advisory": ACTION_CENTRE_ADVISORY,
+    }
+
+
+@app.post("/api/action-centre/recommendations")
+async def generate_recommendations_endpoint(req: Optional[RecommendationRequest] = None):
+    """
+    Generates transparent, explainable, rule-based recommendations for high-risk Ahmedabad wards.
+    Reads existing risk engine outputs and Optimizer recommendations without recalculating risk.
+    Enforces duplicate prevention and respects municipal staff/budget/water resource constraints.
+    """
+    if req is None:
+        req = RecommendationRequest()
+
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk(
+            scenario_id=req.scenario_id
+        )
+
+        resource_constraints = None
+        if any(x is not None for x in (req.available_budget_inr, req.available_crew, req.available_water_l)):
+            resource_constraints = {
+                "available_budget_inr": req.available_budget_inr,
+                "available_crew": req.available_crew,
+                "available_water_l": req.available_water_l,
+            }
+
+        result = generate_rule_based_recommendations(
+            climate_risk_data=climate_data,
+            resource_constraints=resource_constraints,
+            thresholds=req.threshold_overrides,
+            create_in_store=req.persist_to_store,
+            enforce_resource_constraints=req.enforce_resource_constraints,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate rule-based recommendations: {str(e)}"
+        )
+
+
+@app.get("/api/action-centre/recommendations/rules")
+def get_recommendation_rules_metadata():
+    """
+    Returns active recommendation rule definitions, default thresholds,
+    and standard municipal resource schedules.
+    """
+    return {
+        "status": "SUCCESS",
+        "rules": RULE_DEFINITIONS,
+        "default_thresholds": DEFAULT_RECOMMENDATION_THRESHOLDS,
+        "resource_estimates": ACTION_RESOURCE_ESTIMATES,
+        "advisory": ACTION_CENTRE_ADVISORY,
+    }
+
 
 
