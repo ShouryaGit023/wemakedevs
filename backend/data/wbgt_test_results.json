@@ -1,0 +1,145 @@
+{
+  "city": "Ahmedabad",
+  "coordinates": {
+    "lat": 23.0225,
+    "lon": 72.5714
+  },
+  "test_status": "PASSED",
+  "peak_forecast_sample": {
+    "timestamp": "2026-10-10T14:00",
+    "temperature_c": 35.7,
+    "relative_humidity": 30,
+    "solar_radiation_wm2": 741.9,
+    "wind_speed_ms": 10.3,
+    "swbgt_c": 31.05,
+    "wbgt_outdoor_c": 28.67,
+    "risk": {
+      "tier": "MODERATE",
+      "color": "#F59E0B",
+      "action": "Caution for outdoor workers and elderly. Provide shaded rest areas.",
+      "risk_score": 0.45
+    }
+  },
+  "ward_risk_assessments": [
+    {
+      "id": "W1",
+      "name": "Danilimda",
+      "slum_density": 0.85,
+      "outdoor_labor_ratio": 0.75,
+      "elderly_ratio": 0.2,
+      "baseline_heat_risk": 0.92,
+      "effective_wbgt_c": 28.1,
+      "current_risk_level": "MODERATE",
+      "risk_color": "#F59E0B",
+      "vulnerability_score": 0.92
+    },
+    {
+      "id": "W2",
+      "name": "Behrampura",
+      "slum_density": 0.8,
+      "outdoor_labor_ratio": 0.7,
+      "elderly_ratio": 0.18,
+      "baseline_heat_risk": 0.88,
+      "effective_wbgt_c": 27.81,
+      "current_risk_level": "MODERATE",
+      "risk_color": "#F59E0B",
+      "vulnerability_score": 0.88
+    },
+    {
+      "id": "W3",
+      "name": "Asarwa",
+      "slum_density": 0.65,
+      "outdoor_labor_ratio": 0.6,
+      "elderly_ratio": 0.25,
+      "baseline_heat_risk": 0.78,
+      "effective_wbgt_c": 27.09,
+      "current_risk_level": "MODERATE",
+      "risk_color": "#F59E0B",
+      "vulnerability_score": 0.78
+    },
+    {
+      "id": "W4",
+      "name": "Bapunagar",
+      "slum_density": 0.75,
+      "outdoor_labor_ratio": 0.65,
+      "elderly_ratio": 0.22,
+      "baseline_heat_risk": 0.84,
+      "effective_wbgt_c": 27.52,
+      "current_risk_level": "MODERATE",
+      "risk_color": "#F59E0B",
+      "vulnerability_score": 0.84
+    },
+    {
+      "id": "W5",
+      "name": "Khadia (Old City)",
+      "slum_density": 0.4,
+      "outdoor_labor_ratio": 0.45,
+      "elderly_ratio": 0.35,
+      "baseline_heat_risk": 0.72,
+      "effective_wbgt_c": 26.66,
+      "current_risk_level": "MODERATE",
+      "risk_color": "#F59E0B",
+      "vulnerability_score": 0.72
+    },
+    {
+      "id": "W6",
+      "name": "Amraiwadi",
+      "slum_density": 0.7,
+      "outdoor_labor_ratio": 0.68,
+      "elderly_ratio": 0.19,
+      "baseline_heat_risk": 0.81,
+      "effective_wbgt_c": 27.31,
+      "current_risk_level": "MODERATE",
+      "risk_color": "#F59E0B",
+      "vulnerability_score": 0.81
+    },
+    {
+      "id": "W7",
+      "name": "Vatva",
+      "slum_density": 0.78,
+      "outdoor_labor_ratio": 0.72,
+      "elderly_ratio": 0.17,
+      "baseline_heat_risk": 0.86,
+      "effective_wbgt_c": 27.67,
+      "current_risk_level": "MODERATE",
+      "risk_color": "#F59E0B",
+      "vulnerability_score": 0.86
+    },
+    {
+      "id": "W8",
+      "name": "Sabarmati",
+      "slum_density": 0.35,
+      "outdoor_labor_ratio": 0.35,
+      "elderly_ratio": 0.28,
+      "baseline_heat_risk": 0.55,
+      "effective_wbgt_c": 25.44,
+      "current_risk_level": "LOW",
+      "risk_color": "#10B981",
+      "vulnerability_score": 0.55
+    },
+    {
+      "id": "W9",
+      "name": "Maninagar",
+      "slum_density": 0.3,
+      "outdoor_labor_ratio": 0.3,
+      "elderly_ratio": 0.3,
+      "baseline_heat_risk": 0.5,
+      "effective_wbgt_c": 25.09,
+      "current_risk_level": "LOW",
+      "risk_color": "#10B981",
+      "vulnerability_score": 0.5
+    },
+    {
+      "id": "W10",
+      "name": "Naroda",
+      "slum_density": 0.6,
+      "outdoor_labor_ratio": 0.58,
+      "elderly_ratio": 0.21,
+      "baseline_heat_risk": 0.7,
+      "effective_wbgt_c": 26.52,
+      "current_risk_level": "MODERATE",
+      "risk_color": "#F59E0B",
+      "vulnerability_score": 0.7
+    }
+  ]
+}
