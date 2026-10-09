@@ -10,6 +10,11 @@ import sys
 
 # Ensure backend module is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 from backend.wbgt_pipeline import (
     fetch_open_meteo_weather,

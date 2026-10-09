@@ -14,7 +14,25 @@ from backend.wbgt_pipeline import (
     get_ward_wbgt_risk,
     AHMEDABAD_WARDS
 )
-from backend.optimizer import solve_resource_allocation
+from backend.optimizer import (
+    solve_resource_allocation,
+    optimize_from_combined_climate_results,
+    RISK_CATEGORY_INTERVENTION_MAP,
+    INTERVENTIONS
+)
+from backend.water_engine import (
+    assess_citywide_water_risk,
+    get_single_ward_water_risk,
+    DEMONSTRATION_SCENARIOS,
+    calculate_waterlogging_risk,
+    calculate_water_shortage_risk,
+    AHMEDABAD_LAT,
+    AHMEDABAD_LON
+)
+from backend.combined_risk_engine import (
+    evaluate_combined_climate_risk,
+    SCORING_MODES
+)
 
 app = FastAPI(
     title="ClimateShield API - Ahmedabad Heat Decision Support",
@@ -37,6 +55,7 @@ class OptimizationRequest(BaseModel):
     total_crew_members: int = Field(40, ge=1, le=500, description="Total available deployment personnel")
     total_water_cap_l: float = Field(30000.0, ge=1000, le=500000, description="Daily water cap limit in Liters")
     equity_slider: float = Field(0.5, ge=0.0, le=1.0, description="Equity priority slider (0.0 = pure efficiency, 1.0 = maximum equity)")
+    wards: Optional[List[Dict[str, Any]]] = Field(None, description="Optional custom ward risk assessments to optimize")
 
 
 @app.get("/")
@@ -48,7 +67,17 @@ def read_root():
         "endpoints": [
             "/api/weather/wbgt",
             "/api/wards",
-            "/api/optimize"
+            "/api/wards/geojson",
+            "/api/risk/monte-carlo",
+            "/api/optimize",
+            "/api/optimize/climate",
+            "/api/optimize/interventions",
+            "/api/water/wards",
+            "/api/water/wards/{ward_id}",
+            "/api/water/risk",
+            "/api/water/scenarios",
+            "/api/water/assess",
+            "/api/climate/combined-risk"
         ]
     }
 
@@ -149,8 +178,278 @@ def run_optimization(req: OptimizationRequest):
             total_budget_inr=req.total_budget_inr,
             total_crew_members=req.total_crew_members,
             total_water_cap_l=req.total_water_cap_l,
-            equity_slider=req.equity_slider
+            equity_slider=req.equity_slider,
+            wards=req.wards
         )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Optimization solver error: {str(e)}")
+
+
+class ClimateOptimizationRequest(BaseModel):
+    total_budget_inr: float = Field(500000.0, ge=10000, le=10000000, description="Total monetary budget in INR")
+    total_crew_members: int = Field(40, ge=1, le=500, description="Total available deployment personnel")
+    total_water_cap_l: float = Field(30000.0, ge=1000, le=500000, description="Daily water cap limit in Liters")
+    equity_slider: float = Field(0.5, ge=0.0, le=1.0, description="Equity priority slider (0.0 to 1.0)")
+    scenario_id: Optional[str] = Field(None, description="Optional preset demo scenario ID (compound_hazard, monsoon_cloudburst, summer_drought_scarcity)")
+    heat_wbgt: Optional[float] = Field(None, ge=15.0, le=45.0, description="Optional custom outdoor WBGT in °C")
+    weight_heat: float = Field(0.5, ge=0.0, le=1.0)
+    weight_water: float = Field(0.5, ge=0.0, le=1.0)
+    scoring_mode: str = Field("COMPOUND_SYNERGY")
+
+
+@app.get("/api/optimize/interventions")
+def get_interventions_catalog():
+    """
+    Returns documentation of all available interventions mapped by risk category (Heat, Waterlogging, Shortage),
+    with assumed municipal costs, required resources, simulated benefits, and justification templates.
+    """
+    return {
+        "status": "SUCCESS",
+        "total_interventions": len(INTERVENTIONS),
+        "risk_category_mappings": RISK_CATEGORY_INTERVENTION_MAP,
+        "interventions": INTERVENTIONS
+    }
+
+
+@app.post("/api/optimize/climate")
+async def run_climate_optimization(req: ClimateOptimizationRequest):
+    """
+    Directly connects Combined Multi-Hazard Climate Risk outputs (Heat + Water) to the Resource Optimizer.
+    Evaluates all 48 wards and produces an explainable, hazard-matched dispatch plan pending human sign-off.
+    """
+    try:
+        climate_results = await evaluate_combined_climate_risk(
+            weight_heat=req.weight_heat,
+            weight_water=req.weight_water,
+            scoring_mode=req.scoring_mode,
+            scenario_id=req.scenario_id,
+            heat_wbgt_override=req.heat_wbgt
+        )
+        optimization_plan = optimize_from_combined_climate_results(
+            combined_climate_results=climate_results,
+            total_budget_inr=req.total_budget_inr,
+            total_crew_members=req.total_crew_members,
+            total_water_cap_l=req.total_water_cap_l,
+            equity_slider=req.equity_slider
+        )
+        return {
+            "climate_scenario": req.scenario_id or "LIVE_METEOROLOGY",
+            "scoring_mode": req.scoring_mode,
+            "optimization_plan": optimization_plan
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Climate optimization error: {str(e)}")
+
+
+# -------------------------------------------------------------
+# WATER RISK ENGINE ENDPOINTS
+# -------------------------------------------------------------
+
+class WaterAssessmentRequest(BaseModel):
+    scenario_id: Optional[str] = Field(None, description="Preset demonstration scenario ID (e.g., monsoon_cloudburst, summer_drought_scarcity)")
+    rainfall_24h_mm: Optional[float] = Field(None, ge=0.0, le=500.0, description="Optional custom 24-hour rainfall in mm")
+    peak_hourly_rainfall_mm: Optional[float] = Field(None, ge=0.0, le=200.0, description="Optional custom peak 1-hour rainfall in mm/hr")
+    supply_lpcd: Optional[float] = Field(None, ge=10.0, le=300.0, description="Observed/simulated potable supply in Liters Per Capita per Day")
+    reservoir_storage_pct: Optional[float] = Field(None, ge=0.0, le=100.0, description="Observed/simulated bulk reservoir storage percentage")
+
+
+@app.get("/api/water/scenarios")
+def get_water_scenarios():
+    """Returns curated synthetic demonstration scenarios for disaster stress-testing."""
+    return {
+        "status": "SUCCESS",
+        "description": "Pre-configured synthetic scenarios for water risk stress-testing. Clearly labelled as demonstration inputs.",
+        "scenarios": DEMONSTRATION_SCENARIOS
+    }
+
+
+@app.get("/api/water/wards")
+async def get_all_wards_water_risk(
+    scenario_id: Optional[str] = Query(None, description="Optional preset demo scenario: dry_baseline, monsoon_cloudburst, summer_drought_scarcity, compound_hazard"),
+    rainfall_24h_mm: Optional[float] = Query(None, ge=0.0, le=500.0, description="Optional custom 24-hour rainfall in mm"),
+    peak_hourly_rainfall_mm: Optional[float] = Query(None, ge=0.0, le=200.0, description="Optional custom peak 1-hour rainfall in mm/hr"),
+    supply_lpcd: Optional[float] = Query(None, ge=10.0, le=300.0, description="Optional observed supply in Liters Per Capita per Day"),
+    reservoir_storage_pct: Optional[float] = Query(None, ge=0.0, le=100.0, description="Optional observed bulk reservoir storage percentage"),
+    lat: float = Query(23.0225, ge=-90.0, le=90.0, description="Latitude for Open-Meteo weather"),
+    lon: float = Query(72.5714, ge=-180.0, le=180.0, description="Longitude for Open-Meteo weather")
+):
+    """
+    Calculates urban water risk across all available Ahmedabad wards.
+    Returns city status, data quality indicators, and ward-by-ward risk scores with explainable factor breakdowns.
+    """
+    try:
+        results = await assess_citywide_water_risk(
+            scenario_id=scenario_id,
+            supply_lpcd_override=supply_lpcd,
+            reservoir_storage_override=reservoir_storage_pct,
+            rainfall_24h_override=rainfall_24h_mm,
+            peak_hourly_override=peak_hourly_rainfall_mm,
+            lat=lat,
+            lon=lon
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to calculate citywide water risk: {str(e)}")
+
+
+@app.get("/api/water/wards/{ward_id}")
+async def get_single_ward_water_risk_endpoint(
+    ward_id: str,
+    scenario_id: Optional[str] = Query(None, description="Optional preset demo scenario: dry_baseline, monsoon_cloudburst, summer_drought_scarcity, compound_hazard"),
+    rainfall_24h_mm: Optional[float] = Query(None, ge=0.0, le=500.0, description="Optional custom 24-hour rainfall in mm"),
+    peak_hourly_rainfall_mm: Optional[float] = Query(None, ge=0.0, le=200.0, description="Optional custom peak 1-hour rainfall in mm/hr"),
+    supply_lpcd: Optional[float] = Query(None, ge=10.0, le=300.0, description="Optional observed supply in LPCD"),
+    reservoir_storage_pct: Optional[float] = Query(None, ge=0.0, le=100.0, description="Optional observed reservoir storage percentage")
+):
+    """
+    Retrieves the complete water risk profile for a selected ward.
+    Accepts ward ID (e.g., 'W1', 'W7', '36') or ward Name (e.g., 'Danilimda', 'Vatva', '36 DANILIMDA').
+    """
+    try:
+        ward_data = await get_single_ward_water_risk(
+            ward_identifier=ward_id,
+            scenario_id=scenario_id,
+            supply_lpcd_override=supply_lpcd,
+            reservoir_storage_override=reservoir_storage_pct,
+            rainfall_24h_override=rainfall_24h_mm,
+            peak_hourly_override=peak_hourly_rainfall_mm
+        )
+        if not ward_data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Ward '{ward_id}' not found in Ahmedabad administrative wards database. Try using a valid ward ID (e.g., W1-W10, W1-W48) or ward name (e.g., Danilimda, Vatva, Maninagar)."
+            )
+        return ward_data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error evaluating water risk for ward '{ward_id}': {str(e)}")
+
+
+@app.get("/api/water/risk")
+async def get_citywide_water_risk(
+    scenario_id: Optional[str] = Query(None, description="Optional demo scenario ID: dry_baseline, monsoon_cloudburst, summer_drought_scarcity, compound_hazard"),
+    rainfall_24h_mm: Optional[float] = Query(None, ge=0.0, le=500.0, description="Optional custom 24-hour rainfall in mm"),
+    peak_hourly_rainfall_mm: Optional[float] = Query(None, ge=0.0, le=200.0, description="Optional custom peak 1-hour rainfall in mm/hr"),
+    supply_lpcd: Optional[float] = Query(None, ge=10.0, le=300.0, description="Optional observed supply in Liters Per Capita per Day"),
+    reservoir_storage_pct: Optional[float] = Query(None, ge=0.0, le=100.0, description="Optional observed reservoir storage percentage"),
+    lat: float = Query(23.0225, ge=-90.0, le=90.0),
+    lon: float = Query(72.5714, ge=-180.0, le=180.0)
+):
+    """
+    Evaluates ward-level waterlogging/pluvial flood risk and water shortage risk (0-100 scale).
+    Uses live Open-Meteo precipitation unless a synthetic demonstration scenario or custom override is selected.
+    Includes data quality indicator and explainable contributing factor breakdowns.
+    """
+    try:
+        results = await assess_citywide_water_risk(
+            scenario_id=scenario_id,
+            supply_lpcd_override=supply_lpcd,
+            reservoir_storage_override=reservoir_storage_pct,
+            rainfall_24h_override=rainfall_24h_mm,
+            peak_hourly_override=peak_hourly_rainfall_mm,
+            lat=lat,
+            lon=lon
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Water Risk Engine calculation failed: {str(e)}")
+
+
+@app.post("/api/water/assess")
+@app.post("/api/water/calculate")
+async def assess_custom_water_risk(req: WaterAssessmentRequest):
+    """
+    Custom scenario evaluation allowing parameter overrides for what-if simulation planning.
+    """
+    try:
+        results = await assess_citywide_water_risk(
+            scenario_id=req.scenario_id,
+            supply_lpcd_override=req.supply_lpcd,
+            reservoir_storage_override=req.reservoir_storage_pct,
+            rainfall_24h_override=req.rainfall_24h_mm,
+            peak_hourly_override=req.peak_hourly_rainfall_mm
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Custom Water Risk assessment failed: {str(e)}")
+
+
+# -------------------------------------------------------------
+# COMBINED CLIMATE RISK ENGINE ENDPOINTS (HEAT + WATER)
+# -------------------------------------------------------------
+
+class CombinedClimateRiskRequest(BaseModel):
+    weight_heat: float = Field(0.5, ge=0.0, le=1.0, description="Configurable relative weight for Heat Risk")
+    weight_water: float = Field(0.5, ge=0.0, le=1.0, description="Configurable relative weight for Water Risk")
+    scoring_mode: str = Field("COMPOUND_SYNERGY", description="Scoring mode: COMPOUND_SYNERGY | WEIGHTED_AVERAGE | WORST_CASE_PEAK")
+    synergy_multiplier: float = Field(0.15, ge=0.0, le=1.0, description="Compound hazard amplification factor")
+    scenario_id: Optional[str] = Field(None, description="Optional preset demo scenario ID")
+    heat_wbgt: Optional[float] = Field(None, ge=15.0, le=45.0, description="Optional custom outdoor WBGT in °C")
+    supply_lpcd: Optional[float] = Field(None, ge=10.0, le=300.0, description="Optional observed potable supply in LPCD")
+    reservoir_storage_pct: Optional[float] = Field(None, ge=0.0, le=100.0, description="Optional observed reservoir storage percentage")
+    rainfall_24h_mm: Optional[float] = Field(None, ge=0.0, le=500.0, description="Optional custom 24-hr rainfall in mm")
+    peak_hourly_rainfall_mm: Optional[float] = Field(None, ge=0.0, le=200.0, description="Optional custom peak 1-hr rainfall in mm/hr")
+
+
+@app.get("/api/climate/combined-risk")
+async def get_combined_climate_risk(
+    weight_heat: float = Query(0.5, ge=0.0, le=1.0, description="Configurable weight for Heat Risk (0.0 to 1.0)"),
+    weight_water: float = Query(0.5, ge=0.0, le=1.0, description="Configurable weight for Water Risk (0.0 to 1.0)"),
+    scoring_mode: str = Query("COMPOUND_SYNERGY", description="Scoring mode: COMPOUND_SYNERGY, WEIGHTED_AVERAGE, WORST_CASE_PEAK"),
+    synergy_multiplier: float = Query(0.15, ge=0.0, le=1.0, description="Compound synergy multiplier factor"),
+    scenario_id: Optional[str] = Query(None, description="Optional preset demo scenario ID"),
+    heat_wbgt: Optional[float] = Query(None, ge=15.0, le=45.0, description="Optional custom outdoor WBGT in °C"),
+    supply_lpcd: Optional[float] = Query(None, ge=10.0, le=300.0, description="Optional observed supply in LPCD"),
+    reservoir_storage_pct: Optional[float] = Query(None, ge=0.0, le=100.0, description="Optional observed reservoir storage percentage"),
+    rainfall_24h_mm: Optional[float] = Query(None, ge=0.0, le=500.0, description="Optional custom 24-hour rainfall in mm"),
+    peak_hourly_rainfall_mm: Optional[float] = Query(None, ge=0.0, le=200.0, description="Optional custom peak 1-hour rainfall in mm/hr"),
+    lat: float = Query(23.0225, ge=-90.0, le=90.0),
+    lon: float = Query(72.5714, ge=-180.0, le=180.0)
+):
+    """
+    Evaluates combined multi-hazard climate risk integrating Heat and Water risk dimensions.
+    Returns ranked wards, dual-hazard compound flags, explainable rationales, and explicit data quality indicators.
+    """
+    try:
+        results = await evaluate_combined_climate_risk(
+            weight_heat=weight_heat,
+            weight_water=weight_water,
+            scoring_mode=scoring_mode,
+            synergy_multiplier=synergy_multiplier,
+            scenario_id=scenario_id,
+            heat_wbgt_override=heat_wbgt,
+            supply_lpcd_override=supply_lpcd,
+            reservoir_storage_override=reservoir_storage_pct,
+            rainfall_24h_override=rainfall_24h_mm,
+            peak_hourly_override=peak_hourly_rainfall_mm,
+            lat=lat,
+            lon=lon
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Combined Climate Risk evaluation failed: {str(e)}")
+
+
+@app.post("/api/climate/combined-risk")
+async def calculate_combined_climate_risk(req: CombinedClimateRiskRequest):
+    """
+    Parameterized POST endpoint for Combined Climate Risk evaluation and what-if simulation.
+    """
+    try:
+        results = await evaluate_combined_climate_risk(
+            weight_heat=req.weight_heat,
+            weight_water=req.weight_water,
+            scoring_mode=req.scoring_mode,
+            synergy_multiplier=req.synergy_multiplier,
+            scenario_id=req.scenario_id,
+            heat_wbgt_override=req.heat_wbgt,
+            supply_lpcd_override=req.supply_lpcd,
+            reservoir_storage_override=req.reservoir_storage_pct,
+            rainfall_24h_override=req.rainfall_24h_mm,
+            peak_hourly_override=req.peak_hourly_rainfall_mm
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Combined Climate Risk simulation failed: {str(e)}")
