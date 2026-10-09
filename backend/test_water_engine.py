@@ -119,30 +119,33 @@ def test_geojson_wards():
     print("  ✅ GeoJSON integration PASSED")
 
 
-async def test_citywide_assessment():
+def test_citywide_assessment():
     print("\n[TEST 6] Full Citywide Water Assessment Engine")
-    # 1. Live assessment
-    live_res = await assess_citywide_water_risk()
-    assert live_res["city"] == "Ahmedabad"
-    assert len(live_res["wards"]) == 48
-    assert live_res["data_quality_indicator"]["is_synthetic"] is False
-    print(f"  Live citywide assessment: 48 wards evaluated.")
-    print(f"  Citywide Average Composite Risk: {live_res['city_wide_summary']['average_composite_risk_score']}")
-    print(f"  Peak risk ward: {live_res['wards'][0]['ward_name']} (Score: {live_res['wards'][0]['composite_water_risk_score']})")
+    async def _run():
+        # 1. Live assessment
+        live_res = await assess_citywide_water_risk()
+        assert live_res["city"] == "Ahmedabad"
+        assert len(live_res["wards"]) == 48
+        assert live_res["data_quality_indicator"]["is_synthetic"] is False
+        print(f"  Live citywide assessment: 48 wards evaluated.")
+        print(f"  Citywide Average Composite Risk: {live_res['city_wide_summary']['average_composite_risk_score']}")
+        print(f"  Peak risk ward: {live_res['wards'][0]['ward_name']} (Score: {live_res['wards'][0]['composite_water_risk_score']})")
 
-    # 2. Monsoon Cloudburst Demo Scenario
-    monsoon_res = await assess_citywide_water_risk(scenario_id="monsoon_cloudburst")
-    assert monsoon_res["scenario"]["scenario_id"] == "monsoon_cloudburst"
-    assert monsoon_res["data_quality_indicator"]["is_synthetic"] is True
-    assert monsoon_res["city_wide_summary"]["critical_wards_count"] > 0
-    print(f"  Monsoon Cloudburst Scenario: Critical Wards = {monsoon_res['city_wide_summary']['critical_wards_count']}")
+        # 2. Monsoon Cloudburst Demo Scenario
+        monsoon_res = await assess_citywide_water_risk(scenario_id="monsoon_cloudburst")
+        assert monsoon_res["scenario"]["scenario_id"] == "monsoon_cloudburst"
+        assert monsoon_res["data_quality_indicator"]["is_synthetic"] is True
+        assert monsoon_res["city_wide_summary"]["critical_wards_count"] > 0
+        print(f"  Monsoon Cloudburst Scenario: Critical Wards = {monsoon_res['city_wide_summary']['critical_wards_count']}")
 
-    # 3. Summer Drought Scarcity Demo Scenario
-    drought_res = await assess_citywide_water_risk(scenario_id="summer_drought_scarcity")
-    assert drought_res["scenario"]["scenario_id"] == "summer_drought_scarcity"
-    assert drought_res["city_wide_summary"]["average_shortage_risk_score"] > 40.0
-    print(f"  Summer Drought Scenario: Avg Shortage Risk = {drought_res['city_wide_summary']['average_shortage_risk_score']}")
-    print("  ✅ Citywide assessment engine PASSED")
+        # 3. Summer Drought Scarcity Demo Scenario
+        drought_res = await assess_citywide_water_risk(scenario_id="summer_drought_scarcity")
+        assert drought_res["scenario"]["scenario_id"] == "summer_drought_scarcity"
+        assert drought_res["city_wide_summary"]["average_shortage_risk_score"] > 40.0
+        print(f"  Summer Drought Scenario: Avg Shortage Risk = {drought_res['city_wide_summary']['average_shortage_risk_score']}")
+        print("  ✅ Citywide assessment engine PASSED")
+
+    asyncio.run(_run())
 
 
 def test_fastapi_endpoints():
@@ -261,7 +264,7 @@ def main():
     test_water_shortage_calculations()
     test_data_quality_and_confidence()
     test_geojson_wards()
-    asyncio.run(test_citywide_assessment())
+    test_citywide_assessment()
     test_fastapi_endpoints()
     print("\n==================================================")
     print("🎉 ALL WATER RISK ENGINE TESTS COMPLETED SUCCESSFULLY!")
