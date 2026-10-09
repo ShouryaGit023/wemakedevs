@@ -63,6 +63,21 @@ from backend.action_centre import (
     VALID_STATUSES,
     HUMAN_APPROVAL_NOTICE as ACTION_CENTRE_ADVISORY,
 )
+from backend.impact_verification import (
+    assess_intervention_impact,
+    record_impact_assessment,
+    retrieve_impact_assessment,
+    list_impact_assessments,
+    retrieve_assessment_history,
+    update_impact_assessment,
+    generate_impact_verification_summary,
+    export_learning_loop_signals,
+    ExecutionStatus,
+    SourceType,
+    QualityStatus,
+    ATTRIBUTION_DISCLAIMER
+)
+from backend.database import DuplicateAssessmentError
 
 app = FastAPI(
     title="ClimateShield API - Ahmedabad Heat Decision Support",
@@ -121,7 +136,12 @@ def read_root():
             "/api/action-centre/actions/{action_id}",
             "/api/action-centre/actions/{action_id}/status",
             "/api/action-centre/generate-from-risk",
-            "/api/action-centre/generate-from-interventions"
+            "/api/action-centre/generate-from-interventions",
+            "/api/impact/assessments",
+            "/api/impact/assessments/{assessment_id}",
+            "/api/impact/wards/{ward_id}",
+            "/api/impact/summary",
+            "/api/impact/learning-signals",
         ]
     }
 
@@ -1422,4 +1442,207 @@ def get_recommendation_rules_metadata():
     }
 
 
+# -------------------------------------------------------------
+# IMPACT VERIFICATION ENDPOINTS
+# -------------------------------------------------------------
 
+class ImpactAssessmentSubmissionRequest(BaseModel):
+    assessment_id: Optional[str] = Field(None, description="Optional custom assessment identifier; generated automatically if omitted")
+    intervention_id: str = Field(..., description="ID of the executed intervention (e.g. cooling_center, dewatering_pump_deployment)")
+    ward_id: str = Field(..., description="Target ward ID (e.g. W1 to W48)")
+    intervention_type: str = Field(..., description="Operational category of the intervention")
+    execution_status: str = Field("COMPLETED", description="COMPLETED, DEPLOYED, OBSERVED, IN_PROGRESS, or SYNTHETIC_DEMO")
+    is_synthetic: bool = Field(False, description="Whether data is synthetic demonstration data")
+    provenance_mode: Optional[str] = Field(None, description="MEASURED, EXTERNAL_OBSERVATION, ESTIMATED, or SYNTHETIC_DEMO")
+    observations: Optional[List[Dict[str, Any]]] = Field(None, description="Empirical observations list (engine computes differences)")
+    indicators: Optional[Dict[str, Any]] = Field(None, description="Pre-computed indicators dictionary")
+    baseline_period: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Metadata describing baseline observation window")
+    follow_up_period: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Metadata describing follow-up observation window")
+    allow_update: bool = Field(False, description="Set True to update an existing assessment ID and archive history")
+    change_reason: Optional[str] = Field(None, description="Reason for update if allow_update=True")
+
+
+@app.post("/api/impact/assessments", status_code=201)
+async def submit_impact_assessment(req: ImpactAssessmentSubmissionRequest):
+    """
+    Submits and persists an empirical impact assessment for a deployed/completed intervention.
+    Calculates differences across verified baseline and follow-up observations, enforces unit
+    consistency, and records audit history. Rejects uncompleted or merely recommended interventions.
+    """
+    # Enforce Requirement 5: Do not assume an intervention was completed merely because it was recommended.
+    status_upper = req.execution_status.strip().upper()
+    if status_upper in ["RECOMMENDED", "PENDING_HUMAN_APPROVAL", "PROPOSED", "RECOMMENDATION"]:
+        raise HTTPException(
+            status_code=422,
+            detail="UNCOMPLETED_INTERVENTION: Cannot verify an uncompleted intervention. Recommended interventions without field deployment cannot be verified."
+        )
+
+    if not req.observations and not req.indicators:
+        raise HTTPException(
+            status_code=422,
+            detail="Missing assessment payload: either 'observations' list or 'indicators' dict must be provided."
+        )
+
+    try:
+        is_syn = req.is_synthetic or (status_upper == "SYNTHETIC_DEMO")
+        prov_mode = req.provenance_mode or ("SYNTHETIC_DEMO" if is_syn else "MEASURED")
+
+        if req.observations:
+            assessment_obj = assess_intervention_impact(
+                intervention_id=req.intervention_id,
+                ward_id=req.ward_id,
+                intervention_type=req.intervention_type,
+                observations=req.observations,
+                baseline_period=req.baseline_period,
+                follow_up_period=req.follow_up_period,
+                assessment_id=req.assessment_id
+            )
+            saved_record = record_impact_assessment(
+                assessment=assessment_obj,
+                execution_status=status_upper,
+                allow_update=req.allow_update,
+                change_reason=req.change_reason
+            )
+        else:
+            payload = {
+                "assessment_id": req.assessment_id or f"VIA_{req.ward_id}_{req.intervention_id}_{int(time.time())}",
+                "intervention_id": req.intervention_id,
+                "ward_id": req.ward_id,
+                "intervention_type": req.intervention_type,
+                "execution_status": status_upper,
+                "is_synthetic": is_syn,
+                "provenance_mode": prov_mode,
+                "baseline_period": req.baseline_period or {},
+                "follow_up_period": req.follow_up_period or {},
+                "indicators": req.indicators,
+                "attribution_disclaimer": ATTRIBUTION_DISCLAIMER
+            }
+            saved_record = record_impact_assessment(
+                assessment=payload,
+                execution_status=status_upper,
+                allow_update=req.allow_update,
+                change_reason=req.change_reason
+            )
+
+        return saved_record
+    except DuplicateAssessmentError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Impact assessment persistence failed: {str(e)}")
+
+
+@app.get("/api/impact/assessments/{assessment_id}")
+async def get_impact_assessment_endpoint(
+    assessment_id: str,
+    include_history: bool = Query(False, description="Whether to include previous archived audit snapshots")
+):
+    """
+    Retrieves a persisted impact assessment by ID.
+    Optionally includes version audit history.
+    """
+    assessment = retrieve_impact_assessment(assessment_id)
+    if not assessment:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Impact assessment '{assessment_id}' not found."
+        )
+
+    if include_history:
+        history = retrieve_assessment_history(assessment_id)
+        assessment["audit_history"] = history
+
+    return assessment
+
+
+@app.get("/api/impact/wards/{ward_id}")
+async def get_ward_impact_assessments_endpoint(
+    ward_id: str,
+    intervention_id: Optional[str] = Query(None, description="Optional filter by intervention ID"),
+    include_synthetic: bool = Query(True, description="Whether to include synthetic demo records"),
+    limit: int = Query(50, ge=1, le=200, description="Max records to return")
+):
+    """
+    Retrieves all available impact assessments for a given ward.
+    Distinguishes real-world empirical assessments from synthetic demonstration records.
+    """
+    norm_wid = ward_id.strip().upper()
+    assessments = list_impact_assessments(ward_id=norm_wid, intervention_id=intervention_id, limit=limit)
+
+    if not include_synthetic:
+        assessments = [a for a in assessments if not a.get("is_synthetic", False)]
+
+    return {
+        "ward_id": norm_wid,
+        "total_assessments": len(assessments),
+        "assessments": assessments
+    }
+
+
+@app.get("/api/impact/summary")
+async def get_impact_summary_endpoint(
+    ward_id: Optional[str] = Query(None, description="Optional ward filter"),
+    intervention_type: Optional[str] = Query(None, description="Optional intervention type filter"),
+    hazard_category: Optional[str] = Query(None, description="Optional hazard category filter: heat, waterlogging, water_shortage"),
+    include_synthetic: bool = Query(False, description="Whether to include synthetic demo records in summary (defaults to False)")
+):
+    """
+    Summarizes available impact assessments across verified, comparable records.
+    Strictly segregates real-world verified outcomes from synthetic demonstration records.
+    Does not invent observations when data is missing.
+    """
+    summary = generate_impact_verification_summary(
+        ward_id=ward_id,
+        intervention_type=intervention_type,
+        hazard_category=hazard_category,
+        include_synthetic=include_synthetic
+    )
+
+    # Legacy fields for backward compatibility
+    summary["total_recorded_assessments_in_db"] = summary["kpis"]["total_assessments_recorded"]
+    summary["empirical_verified_assessments_count"] = (
+        summary["kpis"]["provenance_counts"]["measured"] +
+        summary["kpis"]["provenance_counts"]["external_observation"] +
+        summary["kpis"]["provenance_counts"]["estimated"]
+    )
+    summary["synthetic_demo_assessments_count"] = summary["kpis"]["provenance_counts"]["simulated_demo"]
+    summary["summarized_assessments_count"] = (
+        (summary["empirical_verified_assessments_count"] + summary["synthetic_demo_assessments_count"])
+        if include_synthetic else summary["empirical_verified_assessments_count"]
+    )
+
+    # Convert breakdown structures for backward compatibility
+    interventions_tally = {k: v["total_assessments"] for k, v in summary.get("by_intervention_type", {}).items()}
+    summary["breakdown_by_intervention_type"] = interventions_tally
+
+    hazard_tally = {}
+    for ind_k, ind_v in summary.get("by_indicator", {}).items():
+        h = ind_v.get("hazard_category", "cross_cutting")
+        hazard_tally[h] = hazard_tally.get(h, 0) + ind_v.get("sample_size", 0)
+    summary["breakdown_by_hazard_category"] = hazard_tally
+
+    return summary
+
+
+@app.get("/api/impact/learning-signals")
+async def get_learning_loop_signals_endpoint(
+    ward_id: Optional[str] = Query(None, description="Optional ward filter"),
+    intervention_id: Optional[str] = Query(None, description="Optional intervention filter"),
+    include_synthetic: bool = Query(False, description="Whether to include synthetic demo records (defaults to False)")
+):
+    """
+    Exposes verified empirical outcome records and calibration weights for the Learning Loop.
+    Read-only interface: does not retrain models or alter predictive risk calculations.
+    """
+    signals = export_learning_loop_signals(
+        ward_id=ward_id,
+        intervention_id=intervention_id,
+        include_synthetic=include_synthetic
+    )
+    return {
+        "status": "SUCCESS",
+        "total_signals": len(signals),
+        "data_integrity_mode": "INCLUDES_SIMULATED_DEMO" if include_synthetic else "REAL_WORLD_VERIFIED_ONLY",
+        "signals": signals
+    }
