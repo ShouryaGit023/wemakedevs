@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Dict, List, Any, Optional
+import time
 
 from backend.wbgt_pipeline import (
     fetch_open_meteo_weather,
@@ -32,6 +33,12 @@ from backend.water_engine import (
 from backend.combined_risk_engine import (
     evaluate_combined_climate_risk,
     SCORING_MODES
+)
+from backend.intervention_engine import (
+    generate_intervention_recommendations,
+    run_what_if_simulation,
+    INTERVENTIONS_CATALOG,
+    PROVENANCE_LABELS
 )
 
 app = FastAPI(
@@ -77,7 +84,12 @@ def read_root():
             "/api/water/risk",
             "/api/water/scenarios",
             "/api/water/assess",
-            "/api/climate/combined-risk"
+            "/api/climate/combined-risk",
+            "/api/interventions/catalog",
+            "/api/interventions/recommend",
+            "/api/interventions/ranked",
+            "/api/interventions/wards/{ward_id}",
+            "/api/interventions/simulate"
         ]
     }
 
@@ -240,6 +252,253 @@ async def run_climate_optimization(req: ClimateOptimizationRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Climate optimization error: {str(e)}")
+
+
+# -------------------------------------------------------------
+# INTERVENTION ENGINE ENDPOINTS & CACHING (Heat + Water Integration)
+# -------------------------------------------------------------
+
+# In-memory cache for Combined Climate Risk to avoid redundant external API calls (Requirement 9)
+_CLIMATE_ASSESSMENT_CACHE: Dict[str, Any] = {
+    "timestamp": 0.0,
+    "ttl_seconds": 300.0,  # 5 minutes cache TTL
+    "data": None,
+    "scenario_id": None
+}
+
+
+async def get_cached_or_fresh_combined_climate_risk(
+    scenario_id: Optional[str] = None,
+    heat_wbgt_override: Optional[float] = None,
+    force_refresh: bool = False
+) -> Dict[str, Any]:
+    """Retrieves cached climate evaluation or triggers fresh calculation if expired."""
+    now = time.time()
+    is_cached = (
+        not force_refresh and
+        _CLIMATE_ASSESSMENT_CACHE["data"] is not None and
+        _CLIMATE_ASSESSMENT_CACHE["scenario_id"] == scenario_id and
+        heat_wbgt_override is None and
+        (now - _CLIMATE_ASSESSMENT_CACHE["timestamp"]) < _CLIMATE_ASSESSMENT_CACHE["ttl_seconds"]
+    )
+    if is_cached:
+        return _CLIMATE_ASSESSMENT_CACHE["data"]
+
+    fresh = await evaluate_combined_climate_risk(
+        scenario_id=scenario_id,
+        heat_wbgt_override=heat_wbgt_override
+    )
+    if heat_wbgt_override is None:
+        _CLIMATE_ASSESSMENT_CACHE["data"] = fresh
+        _CLIMATE_ASSESSMENT_CACHE["timestamp"] = now
+        _CLIMATE_ASSESSMENT_CACHE["scenario_id"] = scenario_id
+    return fresh
+
+
+class InterventionRequest(BaseModel):
+    total_budget_inr: float = Field(500000.0, ge=5000, le=100000000, description="Total monetary budget in INR")
+    total_crew_members: int = Field(40, ge=0, le=1000, description="Total available personnel/staff")
+    total_water_cap_l: float = Field(30000.0, ge=0, le=1000000, description="Daily water cap limit in Liters")
+    equity_slider: float = Field(0.5, ge=0.0, le=1.0, description="Equity priority slider (0.0 = pure efficiency, 1.0 = maximum equity)")
+    wards: Optional[List[Dict[str, Any]]] = Field(None, description="Optional custom ward risk assessments to optimize")
+    scenario_id: Optional[str] = Field(None, description="Optional climate demo scenario ID (monsoon_cloudburst, summer_drought_scarcity, dry_baseline, compound_hazard)")
+    heat_wbgt: Optional[float] = Field(None, ge=15.0, le=45.0, description="Optional custom outdoor WBGT in °C")
+    intervention_capacity_limits: Optional[Dict[str, int]] = Field(None, description="Optional citywide capacity limits per intervention ID")
+    existing_interventions: Optional[List[Dict[str, Any]]] = Field(None, description="Optional preexisting active interventions by ward")
+    include_tradeoff_analysis: bool = Field(True, description="Whether to compute efficiency vs. equity trade-off benchmark comparison")
+
+
+@app.get("/api/interventions/catalog")
+def get_intervention_engine_catalog():
+    """
+    Returns full multi-hazard interventions catalog across Heat, Waterlogging, and Water Shortage,
+    including unit costs, resource footprints, feasibility scores, trigger thresholds, and data provenance labels.
+    """
+    return {
+        "status": "SUCCESS",
+        "provenance_labels": PROVENANCE_LABELS,
+        "total_interventions": len(INTERVENTIONS_CATALOG),
+        "interventions": INTERVENTIONS_CATALOG
+    }
+
+
+@app.post("/api/interventions/recommend")
+async def recommend_interventions(req: InterventionRequest):
+    """
+    Generates, ranks, and optimizes hazard-matched interventions under budget, crew, water,
+    and intervention capacity limits. Directly accounts for preexisting active interventions,
+    prevents double-counting with submodular diminishing returns, and evaluates efficiency vs. equity trade-offs.
+    """
+    try:
+        # If user did not provide custom ward risks, pull from cached/live combined climate evaluation
+        if req.wards:
+            wards_to_use = req.wards
+        else:
+            climate_data = await get_cached_or_fresh_combined_climate_risk(
+                scenario_id=req.scenario_id,
+                heat_wbgt_override=req.heat_wbgt
+            )
+            wards_to_use = climate_data.get("ranked_wards", climate_data.get("wards", []))
+
+        plan = generate_intervention_recommendations(
+            wards=wards_to_use,
+            total_budget_inr=req.total_budget_inr,
+            total_crew_members=req.total_crew_members,
+            total_water_cap_l=req.total_water_cap_l,
+            equity_slider=req.equity_slider,
+            intervention_capacity_limits=req.intervention_capacity_limits,
+            existing_interventions=req.existing_interventions,
+            include_tradeoff_analysis=req.include_tradeoff_analysis
+        )
+        return plan
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Intervention Engine execution failed: {str(e)}")
+
+
+@app.get("/api/interventions/ranked")
+async def get_ranked_interventions_endpoint(
+    ward_id: Optional[str] = Query(None, description="Filter for specific ward (e.g. 'W1', 'Danilimda')"),
+    hazard: Optional[str] = Query(None, description="Filter by hazard: 'heat', 'flood/waterlogging', 'water_shortage'"),
+    equity_slider: float = Query(0.5, ge=0.0, le=1.0, description="Equity slider parameter (0.0 to 1.0)"),
+    scenario_id: Optional[str] = Query(None, description="Optional climate demo scenario ID")
+):
+    """
+    Retrieves ranked candidate interventions across all 48 wards or filtered by ward or hazard,
+    including priority scores, expected impact ranges, people reached, lead times, and rationales.
+    """
+    try:
+        from backend.intervention_engine import default_engine
+        climate_data = await get_cached_or_fresh_combined_climate_risk(scenario_id=scenario_id)
+        wards_to_use = climate_data.get("ranked_wards", climate_data.get("wards", []))
+        candidates = default_engine.generate_candidate_interventions(wards_to_use)
+        ranked = default_engine.rank_candidate_interventions(candidates, equity_slider=equity_slider)
+
+        if ward_id:
+            clean_wid = ward_id.strip().lower()
+            ranked = [
+                c for c in ranked
+                if clean_wid in c["target_ward"]["ward_id"].lower()
+                or clean_wid in c["target_ward"]["ward_name"].lower()
+            ]
+        if hazard:
+            clean_h = hazard.strip().lower()
+            ranked = [c for c in ranked if clean_h in c["related_hazard"].lower() or clean_h in c["category"].lower()]
+
+        return {
+            "status": "SUCCESS",
+            "target_ward_filter": ward_id or "ALL",
+            "hazard_filter": hazard or "ALL",
+            "equity_slider": equity_slider,
+            "total_ranked_interventions": len(ranked),
+            "ranked_interventions": ranked
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve ranked interventions: {str(e)}")
+
+
+@app.get("/api/interventions/wards/{ward_id}")
+async def get_ward_ranked_interventions(
+    ward_id: str,
+    equity_slider: float = Query(0.5, ge=0.0, le=1.0, description="Equity slider parameter"),
+    scenario_id: Optional[str] = Query(None, description="Optional demo scenario ID")
+):
+    """
+    Retrieves complete candidate interventions profile specifically for a single selected ward.
+    """
+    try:
+        from backend.intervention_engine import default_engine
+        climate_data = await get_cached_or_fresh_combined_climate_risk(scenario_id=scenario_id)
+        wards_to_use = climate_data.get("ranked_wards", climate_data.get("wards", []))
+
+        clean_wid = ward_id.strip().lower()
+        matched_wards = [
+            w for w in wards_to_use
+            if clean_wid == str(w.get("id", "")).lower()
+            or clean_wid in str(w.get("name", "")).lower()
+            or clean_wid in str(w.get("official_name", "")).lower()
+        ]
+        if not matched_wards:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Ward '{ward_id}' not found in Ahmedabad administrative wards database. Try using valid ID (e.g. W1-W48) or name (e.g. Danilimda, Vatva)."
+            )
+
+        target_ward = matched_wards[0]
+        candidates = default_engine.generate_candidate_interventions([target_ward])
+        ranked = default_engine.rank_candidate_interventions(candidates, equity_slider=equity_slider)
+
+        return {
+            "status": "SUCCESS",
+            "ward_id": target_ward.get("id", ward_id),
+            "ward_name": target_ward.get("name", ""),
+            "equity_slider": equity_slider,
+            "candidate_interventions_count": len(ranked),
+            "interventions": ranked
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving interventions for ward '{ward_id}': {str(e)}")
+
+
+class WhatIfSimulationRequest(BaseModel):
+    # Simulated scenario parameters (user-controllable)
+    simulated_budget_inr: float = Field(500000.0, ge=5000, le=100000000, description="Simulated monetary budget in INR")
+    simulated_crew_members: int = Field(40, ge=0, le=1000, description="Simulated response teams / personnel count")
+    simulated_water_cap_l: float = Field(30000.0, ge=0, le=1000000, description="Simulated daily water cap limit in Liters")
+    simulated_equity_slider: float = Field(0.5, ge=0.0, le=1.0, description="Simulated equity preference slider (0.0 = efficiency, 1.0 = maximum equity)")
+    simulated_capacity_limits: Optional[Dict[str, int]] = Field(None, description="Optional simulated fleet capacity limits per intervention")
+
+    # Baseline scenario parameters (default to standard municipal parameters)
+    baseline_budget_inr: float = Field(500000.0, ge=5000, le=100000000, description="Baseline comparison budget in INR")
+    baseline_crew_members: int = Field(40, ge=0, le=1000, description="Baseline comparison response teams count")
+    baseline_water_cap_l: float = Field(30000.0, ge=0, le=1000000, description="Baseline comparison water cap limit in Liters")
+    baseline_equity_slider: float = Field(0.5, ge=0.0, le=1.0, description="Baseline comparison equity slider")
+    baseline_capacity_limits: Optional[Dict[str, int]] = Field(None, description="Optional baseline capacity limits")
+
+    # Optional inputs
+    wards: Optional[List[Dict[str, Any]]] = Field(None, description="Optional custom ward risk assessments to simulate")
+    scenario_id: Optional[str] = Field(None, description="Optional climate demo scenario ID")
+    heat_wbgt: Optional[float] = Field(None, ge=15.0, le=45.0, description="Optional custom outdoor WBGT in °C")
+    existing_interventions: Optional[List[Dict[str, Any]]] = Field(None, description="Optional preexisting active interventions by ward")
+
+
+@app.post("/api/interventions/simulate")
+async def simulate_what_if_interventions(req: WhatIfSimulationRequest):
+    """
+    Lightweight What-If Simulator:
+    Recalculates recommended interventions when users modify budget, response teams,
+    water caps, equity preference, or intervention capacity limits.
+    Compares baseline vs. simulated allocations, displays priority shifts (wards gaining/losing),
+    shows impact uncertainty ranges, and provides explainable trade-off narratives.
+    """
+    try:
+        if req.wards:
+            wards_to_use = req.wards
+        else:
+            climate_data = await get_cached_or_fresh_combined_climate_risk(
+                scenario_id=req.scenario_id,
+                heat_wbgt_override=req.heat_wbgt
+            )
+            wards_to_use = climate_data.get("ranked_wards", climate_data.get("wards", []))
+
+        result = run_what_if_simulation(
+            wards=wards_to_use,
+            simulated_budget_inr=req.simulated_budget_inr,
+            simulated_crew_members=req.simulated_crew_members,
+            simulated_water_cap_l=req.simulated_water_cap_l,
+            simulated_equity_slider=req.simulated_equity_slider,
+            simulated_capacity_limits=req.simulated_capacity_limits,
+            baseline_budget_inr=req.baseline_budget_inr,
+            baseline_crew_members=req.baseline_crew_members,
+            baseline_water_cap_l=req.baseline_water_cap_l,
+            baseline_equity_slider=req.baseline_equity_slider,
+            baseline_capacity_limits=req.baseline_capacity_limits,
+            existing_interventions=req.existing_interventions
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"What-If Simulator error: {str(e)}")
 
 
 # -------------------------------------------------------------

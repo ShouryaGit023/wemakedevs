@@ -55,6 +55,11 @@ from backend.optimizer import (
     INTERVENTIONS,
     RISK_CATEGORY_INTERVENTION_MAP
 )
+from backend.intervention_engine import (
+    InterventionEngine,
+    generate_intervention_recommendations,
+    INTERVENTIONS_CATALOG
+)
 
 # -------------------------------------------------------------
 # MOCK FIXTURES FOR OFFLINE / DETERMINISTIC TESTS
@@ -331,6 +336,58 @@ class TestCompleteBackendWorkflow(unittest.TestCase):
         res = solve_resource_allocation(total_budget_inr=500000, total_crew_members=40, total_water_cap_l=30000, wards=low_flood_ward)
         allocated_actions = [a["action_id"] for a in res["ward_allocations"]["W_DRY"]["interventions"]]
         self.assertNotIn("emergency_road_closure", allocated_actions, "Road closures must not be recommended without severe flood justification")
+
+    # =========================================================
+    # 8. VERIFY: INTERVENTION ENGINE CANDIDATE RANKING & OPTIMIZATION
+    # =========================================================
+    def test_11_intervention_engine_candidate_ranking_and_optimization(self):
+        """Verifies multi-hazard intervention generation, multi-criteria ranking, and resource caps."""
+        engine = InterventionEngine()
+        wards = [
+            {"id": "W_CRIT", "name": "Critical Compound Ward", "vulnerability": 0.9, "population": 100000, "heat_risk_score": 85.0, "waterlogging_score": 75.0, "water_shortage_score": 40.0, "is_compound_hotspot": True},
+            {"id": "W_MILD", "name": "Mild Ward", "vulnerability": 0.4, "population": 60000, "heat_risk_score": 25.0, "waterlogging_score": 20.0, "water_shortage_score": 20.0, "is_compound_hotspot": False}
+        ]
+        candidates = engine.generate_candidate_interventions(wards)
+        self.assertTrue(len(candidates) > 0)
+        # Verify mild ward generated 0 candidates
+        mild_cands = [c for c in candidates if c["ward_id"] == "W_MILD"]
+        self.assertEqual(len(mild_cands), 0)
+
+        # Verify ranking
+        ranked = engine.rank_candidate_interventions(candidates, equity_slider=0.5)
+        self.assertGreater(len(ranked), 0)
+        self.assertEqual(ranked[0]["priority_rank"], 1)
+
+        # Verify optimization respects budget
+        opt = engine.optimize_interventions(wards, total_budget_inr=150000, total_crew_members=15, total_water_cap_l=10000)
+        self.assertLessEqual(opt["resource_summary"]["budget"]["allocated_inr"], 150000)
+        self.assertLessEqual(opt["resource_summary"]["crew"]["allocated_members"], 15)
+        self.assertLessEqual(opt["resource_summary"]["water"]["allocated_liters"], 10000)
+        for rec in opt["ranked_recommendations"]:
+            self.assertEqual(rec["approval_status"], "PENDING_HUMAN_APPROVAL")
+
+    def test_12_intervention_engine_endpoints_and_existing_records(self):
+        """Verifies FastAPI intervention endpoints and existing intervention deductions."""
+        # Catalog endpoint
+        r_cat = self.client.get("/api/interventions/catalog")
+        self.assertEqual(r_cat.status_code, 200)
+        self.assertIn("interventions", r_cat.json())
+
+        # Recommend endpoint with existing intervention
+        payload = {
+            "total_budget_inr": 400000.0,
+            "total_crew_members": 30,
+            "total_water_cap_l": 25000.0,
+            "equity_slider": 0.5,
+            "existing_interventions": [
+                {"ward_id": "W1", "action_id": "cooling_center", "units": 2}
+            ]
+        }
+        r_rec = self.client.post("/api/interventions/recommend", json=payload)
+        self.assertEqual(r_rec.status_code, 200)
+        data = r_rec.json()
+        self.assertEqual(data["status"], "OPTIMAL")
+        self.assertEqual(data["existing_interventions_accounted_for"], 1)
 
 
 def run_tests_programmatically():
