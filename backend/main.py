@@ -91,6 +91,54 @@ def get_ahmedabad_wards():
     return {"wards": AHMEDABAD_WARDS}
 
 
+@app.get("/api/wards/geojson")
+def get_ahmedabad_wards_geojson():
+    """Returns official Ahmedabad Wards GeoJSON spatial boundary data."""
+    import json
+    import os
+    geojson_path = os.path.join(os.path.dirname(__file__), "data", "Ahmedabad_Wards.geojson")
+    if not os.path.exists(geojson_path):
+        raise HTTPException(status_code=404, detail="GeoJSON boundary file not found")
+    with open(geojson_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@app.get("/api/risk/monte-carlo")
+def get_ward_risk_monte_carlo(
+    simulations: int = Query(500, ge=50, le=2000, description="Number of Monte Carlo weight sensitivity draws"),
+    weight_hazard: float = Query(0.40, ge=0.0, le=1.0),
+    weight_exposure: float = Query(0.30, ge=0.0, le=1.0),
+    weight_vulnerability: float = Query(0.30, ge=0.0, le=1.0)
+):
+    """
+    Calculates explainable IPCC percentile risk scores (Risk = H x E x V) for each ward,
+    and runs Monte Carlo draws over index weights to generate uncertainty bands (rank stability).
+    """
+    try:
+        from backend.risk_monte_carlo import calculate_ward_risk_and_monte_carlo
+        results = calculate_ward_risk_and_monte_carlo(
+            n_simulations=simulations,
+            w_h=weight_hazard,
+            w_e=weight_exposure,
+            w_v=weight_vulnerability
+        )
+        return {
+            "city": "Ahmedabad",
+            "total_wards": len(results),
+            "monte_carlo_draws": simulations,
+            "nominal_weights": {
+                "hazard": weight_hazard,
+                "exposure": weight_exposure,
+                "vulnerability": weight_vulnerability
+            },
+            "wards_risk": results
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error executing Monte Carlo Risk Engine: {str(e)}")
+
+
+
+
 @app.post("/api/optimize")
 def run_optimization(req: OptimizationRequest):
     """
