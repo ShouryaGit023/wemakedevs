@@ -305,6 +305,28 @@ def init_db() -> None:
     );
     """)
 
+    # 15. Action Centre Operations Records (Persistent shared state across Web and Telegram)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS action_centre_records (
+        action_id TEXT PRIMARY KEY,
+        ward_id TEXT NOT NULL,
+        ward_name TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        priority TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        required_resources_json TEXT,
+        related_hazard TEXT,
+        risk_score REAL,
+        status TEXT NOT NULL,
+        status_history_json TEXT NOT NULL,
+        has_active_blocker INTEGER DEFAULT 0,
+        last_blocker_reason TEXT,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """)
+
     # Indices for relational query performance
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_predictions_ward ON predictions (ward_id, timestamp);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_pred ON recommendations (prediction_id);")

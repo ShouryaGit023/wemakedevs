@@ -65,11 +65,78 @@ HUMAN_APPROVAL_NOTICE = (
 # ---------------------------------------------------------------------------
 
 class ActionStore:
-    """Thread-safe in-memory store for action records."""
+    """Thread-safe persistent store for action records synchronized with SQLite database."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._actions: Dict[str, Dict[str, Any]] = {}
+        self._load_from_db()
+
+    def _load_from_db(self):
+        """Loads all existing actions from the SQLite database on startup."""
+        try:
+            from backend.database import get_db_connection
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM action_centre_records ORDER BY created_at ASC;")
+            rows = cursor.fetchall()
+            conn.close()
+            for r in rows:
+                item = dict(r)
+                try:
+                    item["required_resources"] = json.loads(item.get("required_resources_json") or "{}")
+                except Exception:
+                    item["required_resources"] = {}
+                try:
+                    item["status_history"] = json.loads(item.get("status_history_json") or "[]")
+                except Exception:
+                    item["status_history"] = []
+                item["has_active_blocker"] = bool(item.get("has_active_blocker", 0))
+                self._actions[item["action_id"]] = item
+        except Exception:
+            pass
+
+    def _save_record_to_db(self, record: Dict[str, Any]):
+        """Persists or updates an action record in the SQLite database."""
+        try:
+            from backend.database import get_db_connection
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+            INSERT INTO action_centre_records (
+                action_id, ward_id, ward_name, action_type, priority, reason,
+                required_resources_json, related_hazard, risk_score, status,
+                status_history_json, has_active_blocker, last_blocker_reason,
+                source, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(action_id) DO UPDATE SET
+                status = excluded.status,
+                status_history_json = excluded.status_history_json,
+                has_active_blocker = excluded.has_active_blocker,
+                last_blocker_reason = excluded.last_blocker_reason,
+                updated_at = excluded.updated_at;
+            """, (
+                record["action_id"],
+                record["ward_id"],
+                record["ward_name"],
+                record["action_type"],
+                record["priority"],
+                record["reason"],
+                json.dumps(record.get("required_resources", {})),
+                record.get("related_hazard"),
+                record.get("risk_score"),
+                record["status"],
+                json.dumps(record.get("status_history", [])),
+                1 if record.get("has_active_blocker") else 0,
+                record.get("last_blocker_reason"),
+                record.get("source", "system"),
+                record["created_at"],
+                record["updated_at"]
+            ))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
 
     # -- write ---------------------------------------------------------------
 
@@ -85,7 +152,7 @@ class ActionStore:
         risk_score: Optional[float] = None,
         source: str = "system",
     ) -> Dict[str, Any]:
-        """Creates a new action record with status 'proposed'."""
+        """Creates a new action record with status 'proposed' and persists it."""
         if action_type not in ACTION_TYPES:
             raise ValueError(
                 f"Invalid action_type '{action_type}'. "
@@ -109,6 +176,8 @@ class ActionStore:
             "status_history": [
                 {"status": "proposed", "timestamp": now, "changed_by": source}
             ],
+            "has_active_blocker": False,
+            "last_blocker_reason": None,
             "created_at": now,
             "updated_at": now,
             "source": source,
@@ -116,6 +185,7 @@ class ActionStore:
 
         with self._lock:
             self._actions[action_id] = record
+            self._save_record_to_db(record)
 
         return record
 
@@ -126,13 +196,16 @@ class ActionStore:
         changed_by: str = "operator",
         notes: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Transitions an action to a new status with validation."""
+        """Transitions an action to a new status with validation and persists changes."""
         if new_status not in VALID_STATUSES:
             raise ValueError(
                 f"Invalid status '{new_status}'. Must be one of: {VALID_STATUSES}"
             )
 
         with self._lock:
+            if action_id not in self._actions:
+                self._load_from_db()
+
             if action_id not in self._actions:
                 raise KeyError(f"Action '{action_id}' not found")
 
@@ -157,7 +230,8 @@ class ActionStore:
 
             action["status"] = new_status
             action["updated_at"] = now
-            action["status_history"].append(entry)
+            action.setdefault("status_history", []).append(entry)
+            self._save_record_to_db(action)
 
             return dict(action)
 
@@ -165,6 +239,7 @@ class ActionStore:
 
     def get_action(self, action_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
+            self._load_from_db()
             action = self._actions.get(action_id)
             return dict(action) if action else None
 
@@ -174,8 +249,9 @@ class ActionStore:
         action_type: Optional[str] = None,
         status: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Lists actions with optional filters."""
+        """Lists actions with optional filters and automatic database sync."""
         with self._lock:
+            self._load_from_db()
             results = list(self._actions.values())
 
         if ward_id:
@@ -195,6 +271,7 @@ class ActionStore:
 
     def count_by_status(self) -> Dict[str, int]:
         with self._lock:
+            self._load_from_db()
             counts = {s: 0 for s in VALID_STATUSES}
             for a in self._actions.values():
                 counts[a["status"]] = counts.get(a["status"], 0) + 1
@@ -204,6 +281,15 @@ class ActionStore:
         """Clears all actions (useful for testing)."""
         with self._lock:
             self._actions.clear()
+            try:
+                from backend.database import get_db_connection
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM action_centre_records;")
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
 
 
 # Module-level singleton
