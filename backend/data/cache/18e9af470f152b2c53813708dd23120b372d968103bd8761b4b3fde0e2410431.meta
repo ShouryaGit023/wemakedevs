@@ -1,0 +1,13 @@
+{
+  "key": "18e9af470f152b2c53813708dd23120b372d968103bd8761b4b3fde0e2410431",
+  "namespace": "ecostress_cmr",
+  "params": {
+    "product_type": "LST",
+    "short_name": "ECO2LST",
+    "temporal": "2026-09-10T00:00:00Z,2026-10-10T23:59:59Z",
+    "bbox": "72.3,22.8,72.8,23.3"
+  },
+  "created_at": 1791624913.395098,
+  "expires_at": 1791711313.3950744,
+  "ttl_seconds": 86400
+}

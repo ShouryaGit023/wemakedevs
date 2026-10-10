@@ -87,15 +87,30 @@ def validate_and_normalize_weights(weight_heat: float, weight_water: float) -> T
     return round(weight_heat / total, 4), round(weight_water / total, 4)
 
 
-def get_ward_heat_vulnerability(clean_name: str, raw_name: str) -> float:
-    """Returns baseline heat vulnerability [0.0 - 1.0] for a ward."""
+def get_ward_heat_vulnerability(clean_name: str, raw_name: str, ward_id: Optional[str] = None) -> float:
+    """Returns baseline heat vulnerability [0.0 - 1.0] for a ward, incorporating active learning loop offsets."""
     search_str = f"{clean_name} {raw_name}".lower()
+    base_val = None
     for key, prof in HEAT_VULNERABILITY_PROFILES.items():
         if key.lower() in search_str:
-            return prof["heat_vulnerability"]
-    # Deterministic spatial proxy for other Ahmedabad wards
-    h = sum(ord(c) for c in clean_name)
-    return round(0.40 + ((h * 13 % 45) / 100.0), 2)
+            base_val = prof["heat_vulnerability"]
+            break
+    if base_val is None:
+        # Deterministic spatial proxy for other Ahmedabad wards
+        h = sum(ord(c) for c in clean_name)
+        base_val = round(0.40 + ((h * 13 % 45) / 100.0), 2)
+
+    if ward_id:
+        try:
+            from backend.learning_engine import get_active_model_parameters
+            params = get_active_model_parameters()
+            offsets = params.get("parameters", {}).get("ward_vulnerability_offsets", {})
+            offset = float(offsets.get(ward_id, 0.0))
+            return round(max(0.10, min(0.98, base_val + offset)), 2)
+        except Exception:
+            pass
+
+    return base_val
 
 
 def convert_wbgt_to_risk_score(effective_wbgt_c: float) -> float:
@@ -407,7 +422,7 @@ def match_and_combine_ward_risks(
                 normalized_heat = round(raw_s * 100.0 if raw_s <= 1.0 else raw_s, 1)
                 effective_wbgt = float(h_entry.get("effective_wbgt_c", 28.0))
 
-            heat_vuln = float(h_entry.get("vulnerability_score", h_entry.get("baseline_heat_risk", get_ward_heat_vulnerability(name, official_name))))
+            heat_vuln = float(h_entry.get("vulnerability_score", h_entry.get("baseline_heat_risk", get_ward_heat_vulnerability(name, official_name, ward_id=wid))))
             heat_explanation = (
                 f"Effective WBGT of {effective_wbgt}°C derived from citywide forecast scaled by ward heat vulnerability factor ({heat_vuln})."
             )
@@ -415,7 +430,7 @@ def match_and_combine_ward_risks(
         else:
             # Heat observation missing for this specific ward from the 10-ward pipeline:
             # Scale the current citywide outdoor WBGT by ward structural heat vulnerability (NEVER zero!)
-            heat_vuln = get_ward_heat_vulnerability(name, official_name)
+            heat_vuln = get_ward_heat_vulnerability(name, official_name, ward_id=wid)
             effective_wbgt = round(current_city_wbgt * (0.75 + 0.25 * heat_vuln), 2)
             normalized_heat = convert_wbgt_to_risk_score(effective_wbgt)
             orig_heat_score = effective_wbgt

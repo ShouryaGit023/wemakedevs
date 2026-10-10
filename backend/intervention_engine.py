@@ -504,9 +504,16 @@ class InterventionEngine:
                 if remaining_capacity <= 0:
                     continue
 
-                # Impact range calculation based on hazard
                 h_norm = hazard_score / 100.0
                 base_red = det["base_risk_reduction"] * h_norm
+                try:
+                    from backend.learning_engine import get_active_model_parameters
+                    _act_params = get_active_model_parameters()
+                    _eff_mults = _act_params.get("parameters", {}).get("intervention_efficacy_multipliers", {})
+                    _mult = float(_eff_mults.get(a_id, 1.0))
+                    base_red = round(base_red * _mult, 2)
+                except Exception:
+                    pass
                 factors = det.get("impact_range_factors", {"min": 0.8, "expected": 1.0, "max": 1.2})
                 exp_min = round(base_red * factors["min"], 2)
                 exp_mean = round(base_red * factors["expected"], 2)

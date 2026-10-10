@@ -5,8 +5,10 @@ Exposes Heat Action APIs, Open-Meteo WBGT forecasting, and Optimization endpoint
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Dict, List, Any, Optional
+import os
 import time
 
 from backend.wbgt_pipeline import (
@@ -47,6 +49,47 @@ from backend.data_sources import (
     DataFusionEngine,
     DataSourcesService
 )
+from backend.learning_loop import (
+    PredictionRecordCreate,
+    BatchRecommendationCreate,
+    ExecutedActionCreate,
+    ExecutedActionUpdate,
+    VerifiedOutcomeCreate,
+    record_prediction,
+    get_prediction,
+    list_predictions,
+    record_recommendations,
+    list_recommendations,
+    record_executed_action,
+    update_executed_action,
+    get_action,
+    list_actions,
+    record_verified_outcome,
+    get_outcome,
+    list_outcomes,
+    get_learning_lineage
+)
+from backend.impact_verification import (
+    ImpactVerificationRequest,
+    verify_intervention_impact,
+    get_verification,
+    list_verifications
+)
+from backend.learning_engine import (
+    ModelEvaluationRequest,
+    ProposalApprovalRequest,
+    ProposalRejectionRequest,
+    run_model_evaluation,
+    list_model_evaluations,
+    get_model_evaluation,
+    list_parameter_proposals,
+    get_parameter_proposal,
+    approve_parameter_proposal,
+    reject_parameter_proposal,
+    get_active_model_parameters,
+    list_model_versions,
+    rollback_model_version
+)
 
 app = FastAPI(
     title="ClimateShield API - Ahmedabad Heat Decision Support",
@@ -63,6 +106,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount built React frontend if available
+FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
+if os.path.exists(FRONTEND_DIST):
+    app.mount("/dashboard", StaticFiles(directory=FRONTEND_DIST, html=True), name="dashboard")
+
 
 class OptimizationRequest(BaseModel):
     total_budget_inr: float = Field(500000.0, ge=10000, le=10000000, description="Total monetary budget in INR")
@@ -78,7 +126,9 @@ def read_root():
         "system": "ClimateShield Decision Support System",
         "target_city": "Ahmedabad, Gujarat, India",
         "status": "OPERATIONAL",
+        "dashboard_ui": "/dashboard",
         "endpoints": [
+            "/dashboard",
             "/api/weather/wbgt",
             "/api/wards",
             "/api/wards/geojson",
@@ -99,7 +149,17 @@ def read_root():
             "/api/interventions/simulate",
             "/api/data-sources/era5",
             "/api/data-sources/ecostress",
-            "/api/data-sources/fusion"
+            "/api/data-sources/fusion",
+            "/api/learning/predictions",
+            "/api/learning/recommendations",
+            "/api/learning/actions",
+            "/api/learning/outcomes",
+            "/api/learning/lineage/{prediction_id}",
+            "/api/impact/verify",
+            "/api/impact/verifications",
+            "/api/learning/evaluate",
+            "/api/learning/active-parameters",
+            "/api/learning/versions"
         ]
     }
 
@@ -1029,5 +1089,391 @@ async def optimize_from_fused_data(req: FusedOptimizationRequest):
         return plan
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Fused optimization error: {str(e)}")
+
+
+# -------------------------------------------------------------
+# LEARNING LOOP: DATA RECORDING & LINEAGE ENDPOINTS
+# -------------------------------------------------------------
+
+@app.post("/api/learning/predictions", status_code=201)
+async def create_prediction_record(req: PredictionRecordCreate):
+    """
+    Records a historical risk prediction with stable ID, hazard domain, risk tier, and provenance metadata.
+    Does NOT overwrite past records; appends to persistent SQLite audit store.
+    """
+    try:
+        record = record_prediction(req)
+        return record
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to record prediction: {str(e)}")
+
+
+@app.get("/api/learning/predictions")
+async def get_prediction_records(
+    ward_id: Optional[str] = Query(None, description="Filter by ward ID or name"),
+    hazard_type: Optional[str] = Query(None, description="Filter by hazard: heat, waterlogging, water_shortage, compound"),
+    provenance: Optional[str] = Query(None, description="Filter by provenance: REAL, ESTIMATED, SIMULATED, UNVERIFIED"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """
+    Retrieves historical risk predictions with optional ward, hazard, and provenance filters.
+    """
+    try:
+        return {"predictions": list_predictions(ward_id=ward_id, hazard_type=hazard_type, provenance=provenance, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query predictions: {str(e)}")
+
+
+@app.get("/api/learning/predictions/{prediction_id}")
+async def get_single_prediction(prediction_id: str):
+    """
+    Retrieves a single prediction by its stable ID.
+    """
+    pred = get_prediction(prediction_id)
+    if not pred:
+        raise HTTPException(status_code=404, detail=f"Prediction '{prediction_id}' not found.")
+    return pred
+
+
+@app.post("/api/learning/recommendations", status_code=201)
+async def create_recommendation_records(req: BatchRecommendationCreate):
+    """
+    Records candidate intervention recommendations linked to an existing prediction.
+    Strictly marked as 'PROPOSED' (advisory) and separated from executed field actions.
+    """
+    try:
+        recs = record_recommendations(req.prediction_id, req.ward_id, req.recommendations)
+        return {"prediction_id": req.prediction_id, "ward_id": req.ward_id, "recommendations": recs}
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "not found" in str(e).lower() else 422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to record recommendations: {str(e)}")
+
+
+@app.get("/api/learning/recommendations")
+async def get_recommendation_records(
+    prediction_id: Optional[str] = Query(None, description="Filter by linked prediction ID"),
+    ward_id: Optional[str] = Query(None, description="Filter by ward ID"),
+    status: Optional[str] = Query(None, description="Filter by status: PROPOSED, APPROVED, REJECTED, SUPERSEDED"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """
+    Retrieves candidate recommendation records.
+    """
+    try:
+        return {"recommendations": list_recommendations(prediction_id=prediction_id, ward_id=ward_id, status=status, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query recommendations: {str(e)}")
+
+
+@app.post("/api/learning/actions", status_code=201)
+async def create_executed_action_record(req: ExecutedActionCreate):
+    """
+    Records an approved municipal field action actually carried out or scheduled.
+    Requires named human approval ('approved_by') and execution status tracking.
+    """
+    try:
+        action = record_executed_action(req)
+        return action
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "does not exist" in str(e).lower() else 422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to record executed action: {str(e)}")
+
+
+@app.patch("/api/learning/actions/{action_id}")
+async def patch_executed_action_record(action_id: str, req: ExecutedActionUpdate):
+    """
+    Updates field execution status, completion timestamps, resources drawn, or failure details.
+    """
+    try:
+        updated = update_executed_action(action_id, req)
+        return updated
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "not found" in str(e).lower() else 422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update action: {str(e)}")
+
+
+@app.get("/api/learning/actions")
+async def get_executed_action_records(
+    ward_id: Optional[str] = Query(None, description="Filter by ward ID"),
+    execution_status: Optional[str] = Query(None, description="Filter by status: SCHEDULED, IN_PROGRESS, COMPLETED, FAILED, CANCELLED"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """
+    Lists executed municipal field actions.
+    """
+    try:
+        return {"actions": list_actions(ward_id=ward_id, execution_status=execution_status, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query actions: {str(e)}")
+
+
+@app.get("/api/learning/actions/{action_id}")
+async def get_single_action_record(action_id: str):
+    """
+    Retrieves a single executed field action by its stable ID.
+    """
+    action = get_action(action_id)
+    if not action:
+        raise HTTPException(status_code=404, detail=f"Action '{action_id}' not found.")
+    return action
+
+
+@app.post("/api/learning/outcomes", status_code=201)
+async def create_verified_outcome_record(req: VerifiedOutcomeCreate):
+    """
+    Ingests ground-truth municipal health or water outcome data.
+    Enforces non-PII aggregations and data provenance tiering (REAL, ESTIMATED, SIMULATED).
+    """
+    try:
+        outcome = record_verified_outcome(req)
+        return outcome
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "does not exist" in str(e).lower() else 422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to record outcome: {str(e)}")
+
+
+@app.get("/api/learning/outcomes")
+async def get_verified_outcome_records(
+    ward_id: Optional[str] = Query(None, description="Filter by ward ID"),
+    provenance: Optional[str] = Query(None, description="Filter by provenance: REAL, ESTIMATED, SIMULATED, UNVERIFIED"),
+    prediction_id: Optional[str] = Query(None, description="Filter by linked prediction ID"),
+    action_id: Optional[str] = Query(None, description="Filter by linked executed action ID"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """
+    Lists verified municipal outcomes with provenance indicators.
+    """
+    try:
+        return {"outcomes": list_outcomes(ward_id=ward_id, provenance=provenance, prediction_id=prediction_id, action_id=action_id, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query outcomes: {str(e)}")
+
+
+@app.get("/api/learning/outcomes/{outcome_id}")
+async def get_single_outcome_record(outcome_id: str):
+    """
+    Retrieves a single verified municipal outcome record by its stable ID.
+    """
+    outcome = get_outcome(outcome_id)
+    if not outcome:
+        raise HTTPException(status_code=404, detail=f"Outcome record '{outcome_id}' not found.")
+    return outcome
+
+
+@app.get("/api/learning/lineage/{prediction_id}")
+async def get_lineage_records(prediction_id: str):
+    """
+    Reconstructs the full end-to-end decision lineage tree:
+    Prediction -> Candidate Recommendations -> Executed Actions -> Verified Outcomes.
+    """
+    try:
+        lineage = get_learning_lineage(prediction_id)
+        return lineage
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to reconstruct lineage: {str(e)}")
+
+
+# -------------------------------------------------------------
+# IMPACT VERIFICATION ENDPOINTS (BEFORE-AFTER & DID)
+# -------------------------------------------------------------
+
+@app.post("/api/impact/verify")
+async def run_impact_verification(req: ImpactVerificationRequest):
+    """
+    Evaluates observed outcomes against predicted risks and expected intervention benefits.
+    Enforces causal guardrails:
+    - Simple before-and-after comparisons are labeled CORRELATIONAL_ONLY.
+    - Difference-in-Differences is calculated only when valid comparison control data is available.
+    - Reports insufficient data rather than manufacturing impact results.
+    - Verifies whether field action was completed and whether intended outcome was observed.
+    """
+    try:
+        result = verify_intervention_impact(req)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "not found" in str(e).lower() else 422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Impact verification failed: {str(e)}")
+
+
+@app.get("/api/impact/verifications")
+async def get_impact_verifications(
+    action_id: Optional[str] = Query(None, description="Filter by executed action ID"),
+    ward_id: Optional[str] = Query(None, description="Filter by ward ID"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """
+    Retrieves historical impact verification evaluation reports.
+    """
+    try:
+        return {"verifications": list_verifications(action_id=action_id, ward_id=ward_id, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query impact verifications: {str(e)}")
+
+
+@app.get("/api/impact/verifications/{verification_id}")
+async def get_single_impact_verification(verification_id: str):
+    """
+    Retrieves a single impact verification report by its ID.
+    """
+    verif = get_verification(verification_id)
+    if not verif:
+        raise HTTPException(status_code=404, detail=f"Verification report '{verification_id}' not found.")
+    return verif
+
+
+@app.get("/api/impact/actions/{action_id}")
+async def get_action_impact_verifications(action_id: str):
+    """
+    Retrieves all impact verification reports linked to a specific executed field action.
+    """
+    try:
+        return {"verifications": list_verifications(action_id=action_id)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query verifications for action: {str(e)}")
+
+
+# -------------------------------------------------------------
+# LEARNING ENGINE: EVALUATION & CONTROLLED PARAMETER CALIBRATION
+# -------------------------------------------------------------
+
+@app.post("/api/learning/evaluate")
+async def run_learning_evaluation(req: ModelEvaluationRequest):
+    """
+    Evaluates historical predictions against verified outcomes across Heat, Flooding, and Water Shortage.
+    Calculates MAE, RMSE, Precision, Recall, and F1.
+    Strictly excludes simulated/unverified outcomes from learning.
+    Requires minimum evidence threshold before formulating parameter proposals.
+    """
+    try:
+        result = run_model_evaluation(req)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Model evaluation failed: {str(e)}")
+
+
+@app.get("/api/learning/evaluations")
+async def get_model_evaluations_endpoint(limit: int = Query(50, ge=1, le=200)):
+    """
+    Retrieves historical model evaluation reports and accuracy metrics across Heat, Flooding, and Water Shortage.
+    """
+    try:
+        return {"evaluations": list_model_evaluations(limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query model evaluations: {str(e)}")
+
+
+@app.get("/api/learning/evaluations/{evaluation_id}")
+async def get_single_model_evaluation_endpoint(evaluation_id: str):
+    """
+    Retrieves a single historical model evaluation report by ID.
+    """
+    report = get_model_evaluation(evaluation_id)
+    if not report:
+        raise HTTPException(status_code=404, detail=f"Evaluation report '{evaluation_id}' not found.")
+    return report
+
+
+@app.get("/api/learning/proposals")
+async def get_parameter_proposals_endpoint(
+    status: Optional[str] = Query(None, description="Filter by status: PENDING_APPROVAL, APPROVED, REJECTED"),
+    target_ward: Optional[str] = Query(None, description="Filter by target ward identifier"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """
+    Retrieves staged parameter update proposals requiring municipal approval.
+    """
+    try:
+        return {"proposals": list_parameter_proposals(status=status, target_ward=target_ward, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query proposals: {str(e)}")
+
+
+@app.get("/api/learning/proposals/{proposal_id}")
+async def get_single_parameter_proposal_endpoint(proposal_id: str):
+    """
+    Retrieves a single parameter update proposal by ID.
+    """
+    prop = get_parameter_proposal(proposal_id)
+    if not prop:
+        raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found.")
+    return prop
+
+
+@app.get("/api/learning/active-parameters")
+async def get_active_parameters():
+    """
+    Retrieves the currently active production model parameters and active version.
+    """
+    try:
+        return get_active_model_parameters()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve active parameters: {str(e)}")
+
+
+@app.get("/api/learning/versions")
+async def get_model_versions():
+    """
+    Retrieves the complete immutable changelog and historical model versions.
+    """
+    try:
+        return {"versions": list_model_versions()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query model versions: {str(e)}")
+
+
+@app.post("/api/learning/proposals/{proposal_id}/approve")
+async def approve_proposal_endpoint(proposal_id: str, req: ProposalApprovalRequest):
+    """
+    Authorizes a staged parameter update proposal and commits a new versioned model state.
+    Requires named human approval.
+    """
+    try:
+        result = approve_parameter_proposal(proposal_id, req)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "not found" in str(e).lower() else 422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to approve proposal: {str(e)}")
+
+
+@app.post("/api/learning/proposals/{proposal_id}/reject")
+async def reject_proposal_endpoint(proposal_id: str, req: ProposalRejectionRequest):
+    """
+    Rejects a staged parameter update proposal.
+    Production model parameters remain untouched.
+    """
+    try:
+        result = reject_parameter_proposal(proposal_id, req)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "not found" in str(e).lower() else 422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to reject proposal: {str(e)}")
+
+
+@app.post("/api/learning/versions/{version_id}/rollback")
+async def rollback_version_endpoint(version_id: str, req: ProposalApprovalRequest):
+    """
+    Reactivates a prior immutable model version with complete audit logging.
+    """
+    try:
+        result = rollback_model_version(version_id, req.approved_by)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "not found" in str(e).lower() else 422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to rollback version: {str(e)}")
+
+
+
 
 
