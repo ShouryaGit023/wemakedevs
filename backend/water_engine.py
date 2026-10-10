@@ -20,6 +20,13 @@ from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 import httpx
 
+from backend.database import (
+    get_groundwater_trends,
+    get_groundwater_stations,
+    get_ahmedabad_bulk_reservoir_summary,
+    get_latest_reservoir_observations
+)
+
 # Geographic Constants (Ahmedabad)
 AHMEDABAD_LAT = 23.0225
 AHMEDABAD_LON = 72.5714
@@ -38,6 +45,103 @@ RISK_CATEGORIES = [
 
 # Standard CPHEEO / URDPFI Urban Drinking Water Benchmark for Indian Million-Plus Cities (LPCD)
 STANDARD_LPCD_BENCHMARK = 140.0
+
+# Proximate CGWB Ahmedabad Monitoring Well Stations mapped to urban/peri-urban wards
+AHMEDABAD_WARD_CGWB_STATION_MAP = {
+    "vatwa": "Vatwa Pz-I",
+    "vatva": "Vatwa Pz-I",
+    "vastrapur": "Vastrapur(lake)_Pz_I",
+    "bopal": "Bopal_Pz_I",
+    "ghuma": "Ghuma",
+    "sola": "Sola(HC)_Pz_I",
+    "sanand": "Sanand II",
+    "viramgam": "Viramgam2",
+    "dhandhuka": "Dhandhuka1",
+    "mandal": "Mandal2",
+    "bavla": "Bagodara_Pz_I",
+    "ranpur": "Kundali",
+    "daskroi": "Hansalpur_Pz-I",
+    "barwala": "Barvala"
+}
+
+
+def get_ward_groundwater_context(ward_name: str) -> Dict[str, Any]:
+    """
+    Returns authentic CGWB groundwater context for an Ahmedabad ward.
+    Distinguishes direct proximate piezometer wells from district regional baseline.
+    Never fabricates ward-level piped telemetry.
+    """
+    norm = ward_name.lower().strip()
+    matched_station = None
+    for key, st_name in AHMEDABAD_WARD_CGWB_STATION_MAP.items():
+        if key in norm:
+            matched_station = st_name
+            break
+
+    try:
+        district_trends = get_groundwater_trends(district="Ahmedabad")
+    except Exception:
+        district_trends = {}
+
+    d_stats = district_trends.get("statistics", {})
+    d_stress = district_trends.get("aquifer_stress_assessment", {})
+    d_avg_mbgl = d_stats.get("average_depth_mbgl")
+
+    if matched_station:
+        try:
+            station_trends = get_groundwater_trends(district="Ahmedabad", station_name=matched_station)
+        except Exception:
+            station_trends = {}
+
+        s_stats = station_trends.get("statistics", {})
+        s_stress = station_trends.get("aquifer_stress_assessment", {})
+        avg_mbgl = s_stats.get("average_depth_mbgl")
+
+        return {
+            "has_proximate_station": True,
+            "station_name": matched_station,
+            "proximity_type": "PROXIMATE_IN_SITU_PIEZOMETER",
+            "water_level_mbgl": avg_mbgl,
+            "district_average_depth_mbgl": d_avg_mbgl,
+            "annual_decline_rate_m_per_year": s_stats.get("annual_decline_rate_m_per_year", 0.0),
+            "seasonal_recharge_potential_m": s_stats.get("seasonal_recharge_potential_m"),
+            "aquifer_stress_tier": s_stress.get("tier", "UNKNOWN"),
+            "stress_color": s_stress.get("color", "#6B7280"),
+            "total_observations": s_stats.get("total_observations", 0),
+            "latest_observation_date": s_stats.get("latest_observation"),
+            "earliest_observation_date": s_stats.get("earliest_observation"),
+            "seasonal_averages_mbgl": station_trends.get("seasonal_averages_mbgl", {}),
+            "source": "Central Ground Water Board (CGWB) Quarterly Telemetry",
+            "is_historical": True,
+            "is_stale": True,
+            "freshness_label": "CGWB Quarterly Bulletin (Historical)",
+            "is_estimated": False,
+            "evaluation_basis": "IN_SITU_PROXIMATE_OBSERVATION",
+            "spatial_disclaimer": f"Observation well '{matched_station}' monitors unconfined aquifer water level in the vicinity; not an in-pipe tap pressure sensor."
+        }
+    else:
+        return {
+            "has_proximate_station": False,
+            "station_name": None,
+            "proximity_type": "DISTRICT_AQUIFER_BASELINE",
+            "district_average_depth_mbgl": d_avg_mbgl,
+            "water_level_mbgl": d_avg_mbgl,
+            "annual_decline_rate_m_per_year": d_stats.get("annual_decline_rate_m_per_year", 0.0),
+            "seasonal_recharge_potential_m": d_stats.get("seasonal_recharge_potential_m"),
+            "aquifer_stress_tier": d_stress.get("tier", "UNKNOWN"),
+            "stress_color": d_stress.get("color", "#6B7280"),
+            "total_observations": d_stats.get("total_observations", 0),
+            "latest_observation_date": d_stats.get("latest_observation"),
+            "earliest_observation_date": d_stats.get("earliest_observation"),
+            "seasonal_averages_mbgl": district_trends.get("seasonal_averages_mbgl", {}),
+            "source": "CGWB District Aquifer Regional Baseline (Ahmedabad)",
+            "is_historical": True,
+            "is_stale": True,
+            "freshness_label": "CGWB Historical Bulletin",
+            "is_estimated": True,
+            "evaluation_basis": "DISTRICT_AQUIFER_BASELINE_ESTIMATE",
+            "spatial_disclaimer": "No in-ward CGWB observation station. Value reflects Ahmedabad district-wide aquifer average."
+        }
 
 # Canonical Mapping for Core Ahmedabad Wards to maintain consistency with Heat Action Plan (W1 - W10)
 CORE_WARD_ID_MAPPINGS = {
@@ -68,12 +172,15 @@ AHMEDABAD_WARD_HYDROLOGY_PROFILES = {
     "Naroda": {"elevation_risk": 0.58, "impervious_ratio": 0.70, "slum_density": 0.60, "pipe_coverage_pct": 76.0}
 }
 
-# Labeled Demonstration Scenarios (Explicitly marked as synthetic for stress-testing)
+# Labeled Demonstration Scenarios (Explicitly marked as SIMULATED for stress-testing)
 DEMONSTRATION_SCENARIOS = {
     "dry_baseline": {
         "scenario_id": "dry_baseline",
         "title": "Baseline Fair Weather (Current Season)",
         "description": "Minimal precipitation with regular municipal piped distribution.",
+        "label": "SIMULATED",
+        "provenance": "SIMULATED",
+        "data_mode": "SIMULATED",
         "is_synthetic": True,
         "rainfall_24h_mm": 0.0,
         "peak_hourly_rainfall_mm": 0.0,
@@ -85,6 +192,9 @@ DEMONSTRATION_SCENARIOS = {
         "scenario_id": "monsoon_cloudburst",
         "title": "Severe Monsoon Cloudburst (Pluvial Inundation)",
         "description": "Simulates 78mm torrential precipitation in 2 hours overwhelming storm culverts and underpasses.",
+        "label": "SIMULATED",
+        "provenance": "SIMULATED",
+        "data_mode": "SIMULATED",
         "is_synthetic": True,
         "rainfall_24h_mm": 115.0,
         "peak_hourly_rainfall_mm": 58.0,
@@ -96,6 +206,9 @@ DEMONSTRATION_SCENARIOS = {
         "scenario_id": "summer_drought_scarcity",
         "title": "Extreme Summer Heat & Water Scarcity",
         "description": "Simulates pre-monsoon drought with Narmada canal maintenance, dropping supply to 85 LPCD.",
+        "label": "SIMULATED",
+        "provenance": "SIMULATED",
+        "data_mode": "SIMULATED",
         "is_synthetic": True,
         "rainfall_24h_mm": 0.0,
         "peak_hourly_rainfall_mm": 0.0,
@@ -107,6 +220,9 @@ DEMONSTRATION_SCENARIOS = {
         "scenario_id": "compound_hazard",
         "title": "Compound Flash Flood with Turbidity Supply Disruption",
         "description": "High runoff inundating informal settlements while water treatment plant capacity is curtailed by high turbidity.",
+        "label": "SIMULATED",
+        "provenance": "SIMULATED",
+        "data_mode": "SIMULATED",
         "is_synthetic": True,
         "rainfall_24h_mm": 85.0,
         "peak_hourly_rainfall_mm": 42.0,
@@ -261,44 +377,203 @@ def calculate_water_shortage_risk(
     supply_lpcd: Optional[float] = None,
     reservoir_storage_pct: Optional[float] = None,
     slum_density: float = 0.5,
-    pipe_coverage_pct: float = 75.0
+    pipe_coverage_pct: float = 75.0,
+    reservoir_context: Optional[Dict[str, Any]] = None,
+    groundwater_context: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
-    Calculates water shortage / supply deficit risk score (0 - 100) and factor contributions.
+    Calculates water shortage / supply deficit risk score (0 - 100) across four distinct pillars:
+    1. Per-Capita Potable Supply Deficit (0 - 45.0 pts)
+    2. Bulk Surface Reservoir Depletion (0 - 25.0 pts)
+    3. Groundwater & Aquifer Stress (0 - 15.0 pts)
+    4. Distribution Infrastructure Vulnerability (0 - 15.0 pts)
+
+    Incorporates CGWB in-situ groundwater depth (mbgl), direction of secular change (m/yr),
+    and seasonal recharge potential without double-counting or assuming >20m is uniform catastrophe.
     """
     has_supply_data = supply_lpcd is not None
     has_reservoir_data = reservoir_storage_pct is not None
+    has_groundwater_data = (
+        groundwater_context is not None and
+        (
+            groundwater_context.get("water_level_mbgl") is not None or
+            groundwater_context.get("district_average_depth_mbgl") is not None
+        )
+    )
 
-    # 1. Supply Deficit
+    # 1. Supply Deficit Factor (0 - 45.0 pts)
     if has_supply_data:
         deficit_ratio = max(0.0, (STANDARD_LPCD_BENCHMARK - supply_lpcd) / STANDARD_LPCD_BENCHMARK)
-        supply_pts = min(55.0, deficit_ratio * 55.0)
+        supply_pts = min(45.0, deficit_ratio * 45.0)
     else:
-        supply_pts = 10.0  # Default unobserved baseline proxy
+        supply_pts = 10.0  # Conservative unobserved baseline proxy
 
-    # 2. Reservoir Storage Deficit
+    # 2. Bulk Surface Reservoir Storage Deficit Factor (0 - 25.0 pts)
     if has_reservoir_data:
         storage_deficit = max(0.0, (100.0 - reservoir_storage_pct) / 100.0)
         reservoir_pts = min(25.0, storage_deficit * 25.0)
     else:
-        reservoir_pts = 6.25  # Default unobserved baseline proxy
+        reservoir_pts = 6.25  # Conservative unobserved baseline proxy (25% of 25.0)
 
-    # 3. Distribution Vulnerability
+    # 3. Groundwater & Aquifer Stress Factor (0 - 15.0 pts)
+    gw_stress_details: Dict[str, Any] = {}
+    is_gw_estimate = True
+    gw_eval_basis = "UNOBSERVED_REGIONAL_PRIOR"
+
+    if has_groundwater_data:
+        # Extract depth in meters below ground level (mbgl)
+        depth_mbgl = groundwater_context.get("water_level_mbgl")
+        if depth_mbgl is None:
+            depth_mbgl = groundwater_context.get("district_average_depth_mbgl")
+
+        is_proximate = bool(groundwater_context.get("has_proximate_station", False))
+        is_gw_estimate = not is_proximate or bool(groundwater_context.get("is_estimated", False))
+        gw_eval_basis = "IN_SITU_PROXIMATE_OBSERVATION" if is_proximate else "DISTRICT_AQUIFER_BASELINE_ESTIMATE"
+
+        annual_decline = groundwater_context.get("annual_decline_rate_m_per_year", 0.0)
+        if annual_decline is None:
+            annual_decline = 0.0
+        else:
+            try:
+                annual_decline = float(annual_decline)
+            except (ValueError, TypeError):
+                annual_decline = 0.0
+
+        seasonal_recharge = groundwater_context.get("seasonal_recharge_potential_m")
+        if seasonal_recharge is not None:
+            try:
+                seasonal_recharge = float(seasonal_recharge)
+            except (ValueError, TypeError):
+                seasonal_recharge = None
+
+        tier = str(groundwater_context.get("aquifer_stress_tier", "UNKNOWN"))
+        is_stale = bool(groundwater_context.get("is_stale", True))
+        station_name = groundwater_context.get("station_name")
+
+        # Sub-factor A: Water Table Depth Factor (0.0 - 9.0 pts)
+        # Scaled according to Ahmedabad alluvial aquifer hydrogeology:
+        # <= 5m: negligible stress (0 pts)
+        # 5m to 15m: healthy alluvial urban baseline (0 - 3.0 pts)
+        # 15m to 25m: moderate drawdown (3.0 - 6.0 pts)
+        # 25m to 40m: significant depression (6.0 - 9.0 pts)
+        # > 40m: deep aquifer desaturation (9.0 pts)
+        if depth_mbgl is not None:
+            d_val = float(depth_mbgl)
+            if d_val <= 5.0:
+                depth_pts = 0.0
+            elif d_val <= 15.0:
+                depth_pts = ((d_val - 5.0) / 10.0) * 3.0
+            elif d_val <= 25.0:
+                depth_pts = 3.0 + ((d_val - 15.0) / 10.0) * 3.0
+            elif d_val <= 40.0:
+                depth_pts = 6.0 + ((d_val - 25.0) / 15.0) * 3.0
+            else:
+                depth_pts = 9.0
+        else:
+            depth_pts = 3.0
+
+        # Sub-factor B: Secular Direction of Change / Multi-Year Trend (-2.0 to +4.0 pts)
+        # In mbgl:
+        # Positive annual_decline = water table depth increasing (table falling deeper / depleting) -> Penalty
+        # Negative annual_decline = water table depth decreasing (table rising / recovering) -> Credit
+        if annual_decline >= 2.0:
+            trend_pts = 4.0
+        elif annual_decline >= 0.5:
+            trend_pts = 1.0 + ((annual_decline - 0.5) / 1.5) * 3.0  # 1.0 to 4.0
+        elif annual_decline > 0.0:
+            trend_pts = (annual_decline / 0.5) * 1.0  # 0.0 to 1.0
+        elif annual_decline <= -1.0:
+            trend_pts = -2.0  # Significant multi-year recovery mitigation
+        elif annual_decline < 0.0:
+            trend_pts = max(-2.0, (annual_decline / 1.0) * 2.0)
+        else:
+            trend_pts = 0.0
+
+        # Sub-factor C: Seasonal Recharge Buffer Adjustment (-1.5 to +2.0 pts)
+        # Pre-monsoon vs Post-monsoon recovery in meters:
+        # >= 4.0m: active monsoon recharge buffer -> mitigation credit (-1.5 pts)
+        # 1.5m - 4.0m: moderate seasonal recharge buffer (-0.5 to -1.5 pts)
+        # < 0.5m: negligible recharge -> penalty (+2.0 pts)
+        if seasonal_recharge is not None:
+            if seasonal_recharge >= 4.0:
+                recharge_pts = -1.5
+            elif seasonal_recharge >= 1.5:
+                recharge_pts = -0.5 - ((seasonal_recharge - 1.5) / 2.5) * 1.0
+            elif seasonal_recharge < 0.5:
+                recharge_pts = 2.0
+            else:
+                recharge_pts = 0.0
+        else:
+            recharge_pts = 0.0
+
+        raw_gw_pts = depth_pts + trend_pts + recharge_pts
+
+        # Cross-reference with CGWB official aquifer classification tier
+        if tier == "CRITICAL_AQUIFER_DEPLETION":
+            raw_gw_pts = max(raw_gw_pts, 9.0)
+        elif tier == "HIGH_AQUIFER_STRESS":
+            raw_gw_pts = max(raw_gw_pts, 5.0)
+        elif tier == "SHALLOW_WATER_TABLE":
+            raw_gw_pts = min(raw_gw_pts, 3.0)
+
+        groundwater_pts = max(0.0, min(15.0, raw_gw_pts))
+
+        gw_stress_details = {
+            "depth_mbgl": round(depth_mbgl, 2) if depth_mbgl is not None else None,
+            "annual_decline_rate_m_per_year": round(annual_decline, 3),
+            "seasonal_recharge_potential_m": round(seasonal_recharge, 2) if seasonal_recharge is not None else None,
+            "aquifer_stress_tier": tier,
+            "station_name": station_name,
+            "proximity_type": groundwater_context.get("proximity_type", "DISTRICT_AQUIFER_BASELINE"),
+            "is_proximate_station": is_proximate,
+            "is_stale": is_stale,
+            "is_estimated": is_gw_estimate,
+            "evaluation_basis": gw_eval_basis,
+            "freshness_label": groundwater_context.get("freshness_label", "CGWB Historical Bulletin")
+        }
+    else:
+        # Default unobserved baseline proxy
+        groundwater_pts = 3.0
+        gw_stress_details = {
+            "depth_mbgl": None,
+            "annual_decline_rate_m_per_year": None,
+            "seasonal_recharge_potential_m": None,
+            "aquifer_stress_tier": "UNOBSERVED",
+            "station_name": None,
+            "proximity_type": "UNOBSERVED",
+            "is_proximate_station": False,
+            "is_stale": True,
+            "is_estimated": True,
+            "evaluation_basis": "UNOBSERVED_REGIONAL_PRIOR",
+            "freshness_label": "UNOBSERVED"
+        }
+
+    # 4. Distribution Infrastructure Vulnerability Factor (0 - 15.0 pts)
     unpiped_ratio = max(0.0, (100.0 - pipe_coverage_pct) / 100.0)
-    distribution_pts = min(20.0, (unpiped_ratio * 12.0) + (slum_density * 8.0))
+    distribution_pts = min(15.0, (unpiped_ratio * 9.0) + (slum_density * 6.0))
 
-    raw_score = supply_pts + reservoir_pts + distribution_pts
+    # Total Score [0 - 100 Scale]
+    raw_score = supply_pts + reservoir_pts + groundwater_pts + distribution_pts
     total_score = round(max(0.0, min(100.0, raw_score)), 1)
     classified = classify_risk_score(total_score)
 
-    if not has_supply_data:
+    # Explainable plain-English diagnostic narrative
+    gw_tag = f" (depth: {gw_stress_details['depth_mbgl']} mbgl, tier: {gw_stress_details['aquifer_stress_tier']})" if has_groundwater_data and gw_stress_details.get("depth_mbgl") is not None else ""
+    res_tag = f" and bulk reservoir storage at {reservoir_storage_pct}%" if has_reservoir_data else ""
+
+    if not has_supply_data and not has_reservoir_data and not has_groundwater_data:
         explanation = "Estimated shortage baseline from ward pipe infrastructure coverage. Real-time meter readings not available."
     elif total_score >= 75.0:
-        explanation = f"Critical supply crisis! Severe per-capita deficit ({supply_lpcd} LPCD vs {STANDARD_LPCD_BENCHMARK} standard) combined with low bulk reservoir storage."
+        res_info = f" combined with low bulk reservoir storage ({reservoir_storage_pct}%)" if has_reservoir_data else ""
+        gw_info = f" and acute aquifer stress{gw_tag}" if groundwater_pts >= 8.0 else ""
+        explanation = f"Critical supply crisis! Severe per-capita deficit ({supply_lpcd if has_supply_data else 'estimated'} LPCD vs {STANDARD_LPCD_BENCHMARK} standard){res_info}{gw_info}."
     elif total_score >= 50.0:
-        explanation = f"Elevated water stress due to below-standard supply ({supply_lpcd} LPCD) and reliance on tanker distribution in informal clusters."
+        gw_info = f" with elevated groundwater drawdown{gw_tag}" if groundwater_pts >= 5.0 else ""
+        explanation = f"Elevated water stress due to below-standard supply ({supply_lpcd if has_supply_data else 'estimated'} LPCD){res_tag}{gw_info}."
     else:
-        explanation = f"Adequate water security. Per-capita distribution ({supply_lpcd} LPCD) meets municipal benchmarks."
+        gw_info = f", buffered by localized groundwater resilience{gw_tag}" if groundwater_pts <= 3.0 else ""
+        res_info = f" backed by {reservoir_storage_pct}% bulk reservoir storage" if has_reservoir_data else ""
+        explanation = f"Adequate water security{res_info}{gw_info}. Per-capita distribution meets municipal benchmarks."
 
     return {
         "score": total_score,
@@ -308,16 +583,23 @@ def calculate_water_shortage_risk(
         "contributing_factors": {
             "per_capita_deficit_pts": round(supply_pts, 1),
             "reservoir_depletion_pts": round(reservoir_pts, 1),
+            "groundwater_stress_pts": round(groundwater_pts, 1),
             "distribution_vulnerability_pts": round(distribution_pts, 1)
         },
         "weights_breakdown": {
-            "per_capita_deficit_max": 55.0,
+            "per_capita_deficit_max": 45.0,
             "reservoir_depletion_max": 25.0,
-            "distribution_vulnerability_max": 20.0
+            "groundwater_stress_max": 15.0,
+            "distribution_vulnerability_max": 15.0
         },
         "explanation": explanation,
         "has_measured_supply_data": has_supply_data,
-        "has_measured_reservoir_data": has_reservoir_data
+        "has_measured_reservoir_data": has_reservoir_data,
+        "has_measured_groundwater_data": has_groundwater_data,
+        "is_groundwater_estimate": is_gw_estimate,
+        "groundwater_stress_details": gw_stress_details,
+        "reservoir_context": reservoir_context,
+        "groundwater_context": groundwater_context
     }
 
 
@@ -325,7 +607,9 @@ def compute_data_quality_and_confidence(
     rainfall_source: str,
     has_measured_supply: bool,
     has_measured_drainage_sensors: bool,
-    is_synthetic_scenario: bool
+    is_synthetic_scenario: bool,
+    reservoir_info: Optional[Dict[str, Any]] = None,
+    groundwater_info: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Provides an explicit Data Quality and Confidence Indicator."""
     if is_synthetic_scenario:
@@ -344,22 +628,57 @@ def compute_data_quality_and_confidence(
     unmeasured = ["river_gauge_telemetry", "culvert_flow_sensors", "ward_bulk_flowmeters"]
 
     if "Open-Meteo" in rainfall_source:
-        score += 45
+        score += 40
         measured.append("precipitation_forecast_open_meteo")
     else:
         unmeasured.append("precipitation_radar")
 
     if has_measured_supply:
-        score += 35
+        score += 30
         measured.append("ward_potable_supply_telemetry")
     else:
         unmeasured.append("ward_potable_supply_telemetry")
 
     if has_measured_drainage_sensors:
-        score += 20
+        score += 15
         measured.append("stormwater_drain_depth_sensors")
     else:
         unmeasured.append("stormwater_drain_depth_sensors")
+
+    # Real Groundwater Telemetry (CGWB In-situ Monitoring)
+    disclaimer_gw = ""
+    try:
+        from backend.database import get_db_connection
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*), MAX(observation_date) FROM groundwater_observations WHERE LOWER(district) = 'ahmedabad';")
+        gw_row = c.fetchone()
+        gw_count = gw_row[0] if gw_row else 0
+        conn.close()
+
+        if gw_count > 0:
+            score += 15
+            measured.append("cgwb_in_situ_groundwater_telemetry")
+            disclaimer_gw = " Groundwater observations reflect verified Central Ground Water Board (CGWB) quarterly telemetry; live real-time piezometer sensor feeds are unavailable."
+        else:
+            unmeasured.append("cgwb_in_situ_groundwater_telemetry")
+    except Exception:
+        unmeasured.append("cgwb_in_situ_groundwater_telemetry")
+
+    # Verified Bulk Reservoir Telemetry / CWC Weekly Bulletins
+    disclaimer_reservoir = ""
+    if reservoir_info and reservoir_info.get("has_measured_data"):
+        if reservoir_info.get("is_stale"):
+            score += 8
+            measured.append("cwc_historical_reservoir_bulletin")
+            unmeasured.append("realtime_bulk_reservoir_scada")
+            disclaimer_reservoir = " Bulk reservoir observations reflect historical Central Water Commission (CWC) bulletin reports for Sardar Sarovar and Dharoi; live telemetry is unavailable."
+        else:
+            score += 15
+            measured.append("cwc_verified_bulk_reservoir_bulletin")
+            disclaimer_reservoir = " Bulk reservoir storage is verified from official Central Water Commission (CWC) weekly bulletins for Sardar Sarovar and Dharoi; not live SCADA telemetry."
+    else:
+        unmeasured.append("cwc_bulk_reservoir_storage")
 
     confidence_tier = "HIGH" if score >= 80 else ("MODERATE" if score >= 40 else "LOW")
 
@@ -370,7 +689,7 @@ def compute_data_quality_and_confidence(
         "is_synthetic": False,
         "measured_parameters": measured,
         "unmeasured_parameters": unmeasured,
-        "disclaimer": "Meteorological data is retrieved live from Open-Meteo. Ward-level water supply and drainage metrics are estimated via structural proxies, not physical in-pipe SCADA sensors."
+        "disclaimer": f"Meteorological data is retrieved live from Open-Meteo.{disclaimer_gw}{disclaimer_reservoir} Ward-level water supply and drainage metrics are estimated via structural proxies, not physical in-pipe SCADA sensors."
     }
 
 
@@ -435,6 +754,8 @@ async def assess_citywide_water_risk(
     reservoir_storage_override: Optional[float] = None,
     rainfall_24h_override: Optional[float] = None,
     peak_hourly_override: Optional[float] = None,
+    groundwater_depth_override: Optional[float] = None,
+    groundwater_trend_override: Optional[float] = None,
     lat: float = AHMEDABAD_LAT,
     lon: float = AHMEDABAD_LON
 ) -> Dict[str, Any]:
@@ -457,6 +778,17 @@ async def assess_citywide_water_risk(
         reservoir_pct = reservoir_storage_override if reservoir_storage_override is not None else scenario_data["reservoir_storage_pct"]
         choke_factor = 0.8 if scenario_data["drainage_operational_status"] == "CHOKED_UNDERPASSES" else 0.2
         rainfall_source = f"Scenario: {scenario_data['title']}"
+        reservoir_source_info = {
+            "source": f"Simulated Scenario: {scenario_data['title']}",
+            "is_synthetic": True,
+            "provenance": "SIMULATED",
+            "data_mode": "SIMULATED",
+            "label": "SIMULATED",
+            "composite_storage_pct": reservoir_pct,
+            "is_live": False,
+            "is_stale": False,
+            "disclaimer": "Simulated reservoir percentage for emergency stress-testing."
+        }
     else:
         # Check custom overrides or query Live Open-Meteo API
         if rainfall_24h_override is not None or peak_hourly_override is not None:
@@ -477,15 +809,62 @@ async def assess_citywide_water_risk(
                 rainfall_source = "Offline Fallback (Live API Unreachable)"
 
         supply_lpcd = supply_lpcd_override
-        reservoir_pct = reservoir_storage_override
+        if reservoir_storage_override is not None:
+            reservoir_pct = reservoir_storage_override
+            reservoir_source_info = {
+                "source": "User-Specified Manual Parameter Override",
+                "is_synthetic": True,
+                "provenance": "USER_OVERRIDE",
+                "data_mode": "SIMULATED_OVERRIDE",
+                "composite_storage_pct": reservoir_pct,
+                "is_live": False,
+                "is_stale": False,
+                "disclaimer": "Manual reservoir storage override applied."
+            }
+        else:
+            try:
+                reservoir_source_info = get_ahmedabad_bulk_reservoir_summary()
+                reservoir_pct = reservoir_source_info.get("composite_storage_pct")
+            except Exception:
+                reservoir_pct = None
+                reservoir_source_info = {
+                    "status": "UNAVAILABLE",
+                    "source": "Database Unavailable",
+                    "has_measured_data": False,
+                    "is_synthetic": False,
+                    "is_live": False,
+                    "is_stale": True,
+                    "data_freshness": "UNAVAILABLE",
+                    "disclaimer": "No bulk reservoir data accessible."
+                }
         choke_factor = 0.0
+
+    # Regional Groundwater Resilience (CGWB In-situ Monitoring)
+    try:
+        gw_trends = get_groundwater_trends(district="Ahmedabad")
+    except Exception:
+        gw_trends = {"status": "UNAVAILABLE"}
+
+    if groundwater_depth_override is not None or groundwater_trend_override is not None:
+        gw_trends = dict(gw_trends)
+        gw_trends["is_synthetic"] = True
+        gw_trends["provenance"] = "USER_OVERRIDE"
+        gw_trends["user_override_active"] = True
+        gw_stats = dict(gw_trends.get("statistics", {}))
+        if groundwater_depth_override is not None:
+            gw_stats["average_depth_mbgl"] = groundwater_depth_override
+        if groundwater_trend_override is not None:
+            gw_stats["annual_decline_rate_m_per_year"] = groundwater_trend_override
+        gw_trends["statistics"] = gw_stats
 
     # Data Quality & Confidence Indicator
     confidence_info = compute_data_quality_and_confidence(
         rainfall_source=rainfall_source,
         has_measured_supply=(supply_lpcd is not None),
         has_measured_drainage_sensors=False,
-        is_synthetic_scenario=is_synthetic
+        is_synthetic_scenario=is_synthetic,
+        reservoir_info=reservoir_source_info,
+        groundwater_info=gw_trends
     )
 
     # Load 48 Wards from GeoJSON
@@ -508,6 +887,19 @@ async def assess_citywide_water_risk(
         profile = get_ward_hydrology_profile(raw_name, w_idx)
         w_id = resolve_canonical_ward_id(clean_name, raw_name, w_idx)
 
+        # Retrieve ward-level groundwater context
+        gw_context = get_ward_groundwater_context(clean_name)
+        if groundwater_depth_override is not None or groundwater_trend_override is not None:
+            gw_context = dict(gw_context)
+            if groundwater_depth_override is not None:
+                gw_context["water_level_mbgl"] = groundwater_depth_override
+                gw_context["district_average_depth_mbgl"] = groundwater_depth_override
+            if groundwater_trend_override is not None:
+                gw_context["annual_decline_rate_m_per_year"] = groundwater_trend_override
+            gw_context["is_estimated"] = True
+            gw_context["is_synthetic"] = True
+            gw_context["provenance"] = "USER_OVERRIDE"
+
         # 1. Flood / Waterlogging Risk
         flood_res = calculate_waterlogging_risk(
             rainfall_24h_mm=rainfall_24h,
@@ -517,12 +909,14 @@ async def assess_citywide_water_risk(
             drainage_choke_factor=choke_factor
         )
 
-        # 2. Shortage Risk
+        # 2. Shortage Risk - Incorporating Groundwater Stress
         shortage_res = calculate_water_shortage_risk(
             supply_lpcd=supply_lpcd,
             reservoir_storage_pct=reservoir_pct,
             slum_density=profile["slum_density"],
-            pipe_coverage_pct=profile["pipe_coverage_pct"]
+            pipe_coverage_pct=profile["pipe_coverage_pct"],
+            reservoir_context=reservoir_source_info,
+            groundwater_context=gw_context
         )
 
         # 3. Composite Water Risk Score (0 - 100)
@@ -569,6 +963,7 @@ async def assess_citywide_water_risk(
                 "slum_density": profile["slum_density"],
                 "piped_water_coverage_pct": profile["pipe_coverage_pct"]
             },
+            "groundwater_context": gw_context,
             "timestamp": current_timestamp,
             "data_source": rainfall_source
         })
@@ -595,10 +990,21 @@ async def assess_citywide_water_risk(
             "peak_hourly_rainfall_mm": peak_hourly,
             "observed_supply_lpcd": supply_lpcd,
             "observed_reservoir_storage_pct": reservoir_pct,
+            "bulk_reservoir_storage_pct": reservoir_pct,
+            "bulk_reservoir_provenance": reservoir_source_info.get("provenance", "SIMULATED" if is_synthetic else "UNOBSERVED"),
+            "bulk_reservoir_freshness": reservoir_source_info.get("data_freshness", "SIMULATED" if is_synthetic else "UNOBSERVED"),
+            "bulk_reservoir_is_live": False,  # Never presented as live
+            "bulk_reservoir_is_stale": reservoir_source_info.get("is_stale", False) if not is_synthetic else False,
             "citywide_average_risk_score": avg_composite,
             "citywide_risk_category": classify_risk_score(avg_composite)["category"],
-            "primary_citywide_hazard": primary_city_hazard
+            "primary_citywide_hazard": primary_city_hazard,
+            "district_average_water_table_mbgl": gw_trends.get("statistics", {}).get("average_depth_mbgl"),
+            "aquifer_stress_tier": gw_trends.get("aquifer_stress_assessment", {}).get("tier", "UNOBSERVED"),
+            "groundwater_is_live": False,
+            "groundwater_is_stale": True
         },
+        "bulk_reservoir_summary": reservoir_source_info,
+        "regional_groundwater_resilience": gw_trends,
         "data_quality": confidence_info,
         "data_quality_indicator": confidence_info,
         "city_wide_summary": {
@@ -623,7 +1029,9 @@ async def get_single_ward_water_risk(
     supply_lpcd_override: Optional[float] = None,
     reservoir_storage_override: Optional[float] = None,
     rainfall_24h_override: Optional[float] = None,
-    peak_hourly_override: Optional[float] = None
+    peak_hourly_override: Optional[float] = None,
+    groundwater_depth_override: Optional[float] = None,
+    groundwater_trend_override: Optional[float] = None
 ) -> Optional[Dict[str, Any]]:
     """
     Retrieves the complete water risk profile for a specific ward.
@@ -634,7 +1042,9 @@ async def get_single_ward_water_risk(
         supply_lpcd_override=supply_lpcd_override,
         reservoir_storage_override=reservoir_storage_override,
         rainfall_24h_override=rainfall_24h_override,
-        peak_hourly_override=peak_hourly_override
+        peak_hourly_override=peak_hourly_override,
+        groundwater_depth_override=groundwater_depth_override,
+        groundwater_trend_override=groundwater_trend_override
     )
 
     norm_target = ward_identifier.strip().lower()

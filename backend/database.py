@@ -10,7 +10,7 @@ import os
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "climateshield_baseline.db")
 
@@ -356,6 +356,62 @@ def init_db() -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_impact_history_assessment ON impact_assessment_history (assessment_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_action_verif_action ON action_verifications (action_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_action_id ON action_audit_events (action_id);")
+
+    # 15. Groundwater Observations (CGWB In-situ Monitoring Telemetry)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS groundwater_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_row_id INTEGER,
+        station_name TEXT NOT NULL,
+        agency TEXT NOT NULL DEFAULT 'CGWB',
+        state TEXT NOT NULL DEFAULT 'Gujarat',
+        district TEXT NOT NULL,
+        tehsil TEXT,
+        block TEXT,
+        village TEXT,
+        latitude REAL,
+        longitude REAL,
+        observation_date TEXT NOT NULL,
+        acquisition_timestamp TEXT NOT NULL,
+        quarter_season TEXT,
+        water_level_mbgl REAL,
+        has_water_level INTEGER NOT NULL DEFAULT 1,
+        is_historical INTEGER NOT NULL DEFAULT 1,
+        provenance TEXT NOT NULL DEFAULT 'REAL_MANUAL_CGWB',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_gw_station ON groundwater_observations (station_name);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_gw_district ON groundwater_observations (district);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_gw_date ON groundwater_observations (observation_date);")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_gw_unique ON groundwater_observations (station_name, acquisition_timestamp);")
+
+    # 16. Reservoir Observations (CWC Weekly Storage Bulletins)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS reservoir_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reservoir_name TEXT NOT NULL,
+        state TEXT DEFAULT 'Gujarat',
+        basin TEXT,
+        district TEXT,
+        observation_date TEXT NOT NULL,
+        frl_meters REAL,
+        total_capacity_bcm REAL,
+        current_live_storage_bcm REAL,
+        storage_percentage REAL,
+        last_year_storage_bcm REAL,
+        ten_year_avg_storage_bcm REAL,
+        is_live INTEGER DEFAULT 0,
+        is_stale INTEGER DEFAULT 0,
+        data_freshness TEXT,
+        source TEXT NOT NULL,
+        provenance TEXT DEFAULT 'OFFICIAL_CWC_BULLETIN',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_res_name ON reservoir_observations (reservoir_name);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_res_date ON reservoir_observations (observation_date);")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_res_unique ON reservoir_observations (reservoir_name, observation_date);")
 
     conn.commit()
     conn.close()
@@ -881,7 +937,652 @@ def list_action_audit_events(action_id: Optional[str] = None, limit: int = 100) 
     return results
 
 
+# -------------------------------------------------------------
+# GROUNDWATER DATA OPERATIONS (CGWB IN-SITU MONITORING)
+# -------------------------------------------------------------
+
+def insert_groundwater_observations(records: List[Dict[str, Any]]) -> Tuple[int, int]:
+    """
+    Inserts a list of normalized groundwater observation dictionaries into SQLite.
+    Skips duplicates using (station_name, acquisition_timestamp) unique constraint.
+    Returns (inserted_count, skipped_count).
+    """
+    if not records:
+        return 0, 0
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    insert_sql = """
+    INSERT OR IGNORE INTO groundwater_observations (
+        source_row_id, station_name, agency, state, district,
+        tehsil, block, village, latitude, longitude,
+        observation_date, acquisition_timestamp, quarter_season,
+        water_level_mbgl, has_water_level, is_historical, provenance
+    ) VALUES (
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?, ?
+    );
+    """
+
+    data_tuples = [
+        (
+            r.get("source_row_id"),
+            r["station_name"],
+            r.get("agency", "CGWB"),
+            r.get("state", "Gujarat"),
+            r.get("district", ""),
+            r.get("tehsil"),
+            r.get("block"),
+            r.get("village"),
+            r.get("latitude"),
+            r.get("longitude"),
+            r["observation_date"],
+            r.get("acquisition_timestamp", f"{r['observation_date']}T00:00:00"),
+            r.get("quarter_season", "UNKNOWN"),
+            r.get("water_level_mbgl"),
+            1 if r.get("has_water_level", True) else 0,
+            1 if r.get("is_historical", True) else 0,
+            r.get("provenance", "REAL_MANUAL_CGWB")
+        )
+        for r in records
+    ]
+
+    initial_count = cursor.execute("SELECT COUNT(*) FROM groundwater_observations;").fetchone()[0]
+    cursor.executemany(insert_sql, data_tuples)
+    conn.commit()
+    final_count = cursor.execute("SELECT COUNT(*) FROM groundwater_observations;").fetchone()[0]
+    conn.close()
+
+    inserted = final_count - initial_count
+    skipped = len(records) - inserted
+    return inserted, skipped
+
+
+def get_groundwater_stations(district: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Returns unique monitoring stations with geographic coordinates, latest reading,
+    monitoring date, and total observation count.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = """
+    SELECT 
+        station_name,
+        district,
+        tehsil,
+        block,
+        village,
+        latitude,
+        longitude,
+        agency,
+        COUNT(*) as total_observations,
+        SUM(CASE WHEN has_water_level = 1 THEN 1 ELSE 0 END) as valid_readings_count,
+        MIN(observation_date) as earliest_date,
+        MAX(observation_date) as latest_date
+    FROM groundwater_observations
+    WHERE 1=1
+    """
+    params: List[Any] = []
+    if district:
+        query += " AND LOWER(district) = LOWER(?)"
+        params.append(district.strip())
+
+    query += " GROUP BY station_name ORDER BY district ASC, station_name ASC;"
+    cursor.execute(query, tuple(params))
+    rows = cursor.fetchall()
+
+    stations = []
+    for r in rows:
+        d = dict(r)
+        # Fetch latest reading value specifically
+        cursor.execute("""
+            SELECT water_level_mbgl, observation_date, quarter_season 
+            FROM groundwater_observations 
+            WHERE station_name = ? AND has_water_level = 1 
+            ORDER BY observation_date DESC LIMIT 1;
+        """, (d["station_name"],))
+        latest_row = cursor.fetchone()
+        if latest_row:
+            d["latest_water_level_mbgl"] = latest_row["water_level_mbgl"]
+            d["latest_quarter_season"] = latest_row["quarter_season"]
+        else:
+            d["latest_water_level_mbgl"] = None
+            d["latest_quarter_season"] = None
+        stations.append(d)
+
+    conn.close()
+    return stations
+
+
+def get_groundwater_observations(
+    station_name: Optional[str] = None,
+    district: Optional[str] = None,
+    season: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    """
+    Retrieves filtered groundwater observation history records.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = "SELECT * FROM groundwater_observations WHERE 1=1"
+    params: List[Any] = []
+
+    if station_name:
+        query += " AND LOWER(station_name) = LOWER(?)"
+        params.append(station_name.strip())
+    if district:
+        query += " AND LOWER(district) = LOWER(?)"
+        params.append(district.strip())
+    if season:
+        query += " AND UPPER(quarter_season) = UPPER(?)"
+        params.append(season.strip())
+    if start_date:
+        query += " AND observation_date >= ?"
+        params.append(start_date.strip())
+    if end_date:
+        query += " AND observation_date <= ?"
+        params.append(end_date.strip())
+
+    query += " ORDER BY observation_date DESC, station_name ASC LIMIT ? OFFSET ?;"
+    params.extend([limit, offset])
+
+    cursor.execute(query, tuple(params))
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+
+    for r in rows:
+        r["has_water_level"] = bool(r.get("has_water_level", 1))
+        r["is_historical"] = bool(r.get("is_historical", 1))
+
+    return rows
+
+
+def get_groundwater_trends(
+    district: Optional[str] = "Ahmedabad",
+    station_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Calculates empirical water table depth statistics, seasonal recharge/depletion,
+    and multi-year aquifer drawdown trends.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    where_clauses = ["has_water_level = 1"]
+    params: List[Any] = []
+
+    if station_name:
+        where_clauses.append("LOWER(station_name) = LOWER(?)")
+        params.append(station_name.strip())
+    elif district:
+        where_clauses.append("LOWER(district) = LOWER(?)")
+        params.append(district.strip())
+
+    where_sql = " AND ".join(where_clauses)
+
+    # Basic stats
+    cursor.execute(f"""
+        SELECT 
+            COUNT(*) as reading_count,
+            COUNT(DISTINCT station_name) as station_count,
+            MIN(water_level_mbgl) as min_depth,
+            MAX(water_level_mbgl) as max_depth,
+            AVG(water_level_mbgl) as avg_depth,
+            MIN(observation_date) as earliest_date,
+            MAX(observation_date) as latest_date
+        FROM groundwater_observations
+        WHERE {where_sql};
+    """, tuple(params))
+    base_stats = dict(cursor.fetchone() or {})
+
+    if not base_stats or base_stats.get("reading_count", 0) == 0:
+        conn.close()
+        return {
+            "status": "NO_OBSERVATIONS",
+            "scope": {"district": district, "station_name": station_name},
+            "reading_count": 0,
+            "message": "No validated groundwater observations found for specified criteria."
+        }
+
+    # Seasonal breakdown
+    cursor.execute(f"""
+        SELECT 
+            quarter_season,
+            COUNT(*) as count,
+            AVG(water_level_mbgl) as avg_mbgl
+        FROM groundwater_observations
+        WHERE {where_sql}
+        GROUP BY quarter_season;
+    """, tuple(params))
+    seasonal_rows = cursor.fetchall()
+    seasonal_averages = {r["quarter_season"]: round(r["avg_mbgl"], 2) for r in seasonal_rows}
+
+    # Annual breakdown
+    cursor.execute(f"""
+        SELECT 
+            SUBSTR(observation_date, 1, 4) as obs_year,
+            COUNT(*) as count,
+            AVG(water_level_mbgl) as avg_mbgl
+        FROM groundwater_observations
+        WHERE {where_sql}
+        GROUP BY obs_year
+        ORDER BY obs_year ASC;
+    """, tuple(params))
+    annual_rows = cursor.fetchall()
+    annual_series = [
+        {
+            "year": r["obs_year"],
+            "count": r["count"],
+            "avg_depth_mbgl": round(r["avg_mbgl"], 2)
+        }
+        for r in annual_rows
+    ]
+
+    # Annual decline / recovery rate calculation
+    annual_decline_rate = 0.0
+    if len(annual_series) >= 2:
+        y_first = annual_series[0]
+        y_last = annual_series[-1]
+        try:
+            year_gap = int(y_last["year"]) - int(y_first["year"])
+            if year_gap > 0:
+                annual_decline_rate = round((y_last["avg_depth_mbgl"] - y_first["avg_depth_mbgl"]) / year_gap, 3)
+        except Exception:
+            annual_decline_rate = 0.0
+
+    avg_mbgl = round(base_stats.get("avg_depth", 0.0) or 0.0, 2)
+    pre_monsoon = seasonal_averages.get("PRE_MONSOON")
+    post_monsoon = seasonal_averages.get("POST_MONSOON")
+    seasonal_recharge_m = round(pre_monsoon - post_monsoon, 2) if (pre_monsoon is not None and post_monsoon is not None) else None
+
+    # Stress Tier Classification
+    if avg_mbgl > 35.0 or annual_decline_rate > 1.5:
+        stress_tier = "CRITICAL_AQUIFER_DEPLETION"
+        stress_color = "#EF4444"
+        risk_description = "Severe regional water table depression. Deep borewells under severe draft stress."
+    elif avg_mbgl > 20.0 or annual_decline_rate > 0.5:
+        stress_tier = "HIGH_AQUIFER_STRESS"
+        stress_color = "#F59E0B"
+        risk_description = "Significant water table drawdown. Buffer capacity during prolonged summer heatwaves is constrained."
+    elif avg_mbgl > 10.0:
+        stress_tier = "MODERATE_WATER_TABLE"
+        stress_color = "#3B82F6"
+        risk_description = "Intermediate groundwater depth with seasonal recharge responsiveness."
+    else:
+        stress_tier = "SHALLOW_WATER_TABLE"
+        stress_color = "#10B981"
+        risk_description = "Shallow water table with active monsoon recharge; low drought vulnerability."
+
+    conn.close()
+
+    return {
+        "status": "SUCCESS",
+        "scope": {
+            "target": station_name if station_name else (district or "ALL_GUJARAT"),
+            "is_station_specific": bool(station_name),
+            "district": district
+        },
+        "statistics": {
+            "total_observations": base_stats.get("reading_count", 0),
+            "station_count": base_stats.get("station_count", 0),
+            "earliest_observation": base_stats.get("earliest_date"),
+            "latest_observation": base_stats.get("latest_date"),
+            "average_depth_mbgl": avg_mbgl,
+            "shallowest_depth_mbgl": round(base_stats.get("min_depth", 0.0) or 0.0, 2),
+            "deepest_depth_mbgl": round(base_stats.get("max_depth", 0.0) or 0.0, 2),
+            "seasonal_recharge_potential_m": seasonal_recharge_m,
+            "annual_decline_rate_m_per_year": annual_decline_rate
+        },
+        "aquifer_stress_assessment": {
+            "tier": stress_tier,
+            "color": stress_color,
+            "summary": risk_description
+        },
+        "seasonal_averages_mbgl": seasonal_averages,
+        "annual_trend_series": annual_series,
+        "scientific_integrity": {
+            "source_agency": "Central Ground Water Board (CGWB)",
+            "measurement_mode": "In-situ Quarterly Manual Telemetry (Piezometers & Dugwells)",
+            "provenance": "REAL_MANUAL_CGWB",
+            "spatial_disclaimer": "Measurements reflect discrete regional aquifer observation wells and do not measure localized piped municipal supply at ward level."
+        }
+    }
+
+
+def seed_groundwater_data(csv_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Seeds groundwater observations into SQLite from raw CSV if table is currently empty.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM groundwater_observations;")
+    existing_count = cursor.fetchone()[0]
+    conn.close()
+
+    if existing_count > 0:
+        return {
+            "status": "ALREADY_SEEDED",
+            "existing_records": existing_count,
+            "message": "Groundwater table already populated. Skipping duplicate seed."
+        }
+
+    from backend.data_sources.groundwater_parser import GroundwaterParser
+    parser = GroundwaterParser(csv_path)
+    res = parser.parse()
+
+    if not res.get("success"):
+        return {
+            "status": "PARSE_ERROR",
+            "error": res.get("error", "Unknown parse error")
+        }
+
+    inserted, skipped = insert_groundwater_observations(res["valid_records"])
+    return {
+        "status": "SUCCESS_SEEDED",
+        "total_parsed": res["valid_records_count"],
+        "inserted_records": inserted,
+        "skipped_duplicates": skipped,
+        "unique_stations": res["stations_count"]
+    }
+
+
+# -------------------------------------------------------------
+# RESERVOIR DATA OPERATIONS (CWC WEEKLY STORAGE BULLETINS)
+# -------------------------------------------------------------
+
+def insert_reservoir_observations(records: List[Dict[str, Any]]) -> Tuple[int, int]:
+    """
+    Inserts a list of normalized reservoir observation dictionaries into SQLite.
+    Skips duplicates using (reservoir_name, observation_date) unique constraint.
+    Returns (inserted_count, skipped_count).
+    """
+    if not records:
+        return 0, 0
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    insert_sql = """
+    INSERT OR IGNORE INTO reservoir_observations (
+        reservoir_name, state, basin, district, observation_date,
+        frl_meters, total_capacity_bcm, current_live_storage_bcm,
+        storage_percentage, last_year_storage_bcm, ten_year_avg_storage_bcm,
+        is_live, is_stale, data_freshness, source, provenance
+    ) VALUES (
+        ?, ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?, ?, ?
+    );
+    """
+
+    data_tuples = [
+        (
+            r["reservoir_name"],
+            r.get("state", "Gujarat"),
+            r.get("basin"),
+            r.get("district"),
+            r["observation_date"],
+            r.get("frl_meters"),
+            r.get("total_capacity_bcm"),
+            r.get("current_live_storage_bcm"),
+            r.get("storage_percentage"),
+            r.get("last_year_storage_bcm"),
+            r.get("ten_year_avg_storage_bcm"),
+            0,  # is_live: Never present weekly bulletin or historical data as live telemetry
+            1 if r.get("is_stale", False) else 0,
+            r.get("data_freshness", "VERIFIED_OBSERVATION"),
+            r.get("source", "Central Water Commission (CWC) Weekly Reservoir Storage Bulletin"),
+            r.get("provenance", "OFFICIAL_CWC_BULLETIN")
+        )
+        for r in records
+    ]
+
+    initial_count = cursor.execute("SELECT COUNT(*) FROM reservoir_observations;").fetchone()[0]
+    cursor.executemany(insert_sql, data_tuples)
+    conn.commit()
+    final_count = cursor.execute("SELECT COUNT(*) FROM reservoir_observations;").fetchone()[0]
+    conn.close()
+
+    inserted = final_count - initial_count
+    skipped = len(records) - inserted
+    return inserted, skipped
+
+
+def get_reservoir_observations(
+    reservoir_name: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    """
+    Retrieves filtered reservoir observations, ordered by observation date descending.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    clauses = []
+    params: List[Any] = []
+
+    if reservoir_name:
+        clauses.append("LOWER(reservoir_name) = ?")
+        params.append(reservoir_name.strip().lower())
+
+    if start_date:
+        clauses.append("observation_date >= ?")
+        params.append(start_date.strip())
+
+    if end_date:
+        clauses.append("observation_date <= ?")
+        params.append(end_date.strip())
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    query = f"""
+    SELECT 
+        id, reservoir_name, state, basin, district, observation_date,
+        frl_meters, total_capacity_bcm, current_live_storage_bcm,
+        storage_percentage, last_year_storage_bcm, ten_year_avg_storage_bcm,
+        is_live, is_stale, data_freshness, source, provenance, created_at
+    FROM reservoir_observations
+    {where_sql}
+    ORDER BY observation_date DESC, reservoir_name ASC
+    LIMIT ? OFFSET ?;
+    """
+    params.extend([max(1, limit), max(0, offset)])
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(r) for r in rows]
+
+
+def get_latest_reservoir_observations(
+    reservoir_names: Optional[List[str]] = None,
+    max_age_days: int = 30
+) -> List[Dict[str, Any]]:
+    """
+    Returns the most recent valid observation for each monitored reservoir.
+    Recalculates staleness dynamically against the observation date.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = """
+    SELECT r1.*
+    FROM reservoir_observations r1
+    INNER JOIN (
+        SELECT reservoir_name, MAX(observation_date) as max_date
+        FROM reservoir_observations
+        GROUP BY reservoir_name
+    ) r2 ON r1.reservoir_name = r2.reservoir_name AND r1.observation_date = r2.max_date
+    ORDER BY r1.reservoir_name ASC;
+    """
+
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    conn.close()
+
+    today_dt = datetime.now().date()
+    results = []
+
+    for r in rows:
+        item = dict(r)
+        # Evaluate staleness
+        try:
+            obs_dt = datetime.strptime(item["observation_date"], "%Y-%m-%d").date()
+            age_days = (today_dt - obs_dt).days
+        except Exception:
+            age_days = 9999
+
+        is_stale = age_days > max_age_days
+        item["is_stale"] = 1 if is_stale else 0
+        item["is_live"] = 0  # Never live
+        item["observation_age_days"] = age_days
+        if is_stale:
+            item["data_freshness"] = "HISTORICAL_STALE"
+        elif age_days <= 7:
+            item["data_freshness"] = "RECENT_WEEKLY_BULLETIN"
+        else:
+            item["data_freshness"] = "VERIFIED_OBSERVATION"
+
+        if reservoir_names:
+            normalized_targets = [n.strip().lower() for n in reservoir_names]
+            if item["reservoir_name"].lower() in normalized_targets:
+                results.append(item)
+        else:
+            results.append(item)
+
+    return results
+
+
+def get_ahmedabad_bulk_reservoir_summary(max_age_days: int = 30) -> Dict[str, Any]:
+    """
+    Calculates verified bulk reservoir storage for Ahmedabad Municipal Corporation (AMC).
+    Combines Sardar Sarovar (Narmada Canal lifeline, ~80% supply weight) and
+    Dharoi Reservoir (Sabarmati River lifeline, ~20% supply weight).
+    Guarantees that historical or stale data is NEVER presented as live.
+    """
+    latest_records = get_latest_reservoir_observations(
+        reservoir_names=["Sardar Sarovar", "Dharoi"],
+        max_age_days=max_age_days
+    )
+
+    sardar = next((r for r in latest_records if "sardar" in r["reservoir_name"].lower()), None)
+    dharoi = next((r for r in latest_records if "dharoi" in r["reservoir_name"].lower()), None)
+
+    if not sardar and not dharoi:
+        return {
+            "status": "UNAVAILABLE",
+            "message": "No verified reservoir observations found for Sardar Sarovar or Dharoi in database.",
+            "composite_storage_pct": None,
+            "has_measured_data": False,
+            "is_live": False,
+            "is_stale": True,
+            "data_freshness": "NO_DATA",
+            "disclaimer": "Reservoir observations missing from baseline database. Requires official CWC bulletin import."
+        }
+
+    # Extract individual percentages
+    s_pct = sardar["storage_percentage"] if sardar else None
+    d_pct = dharoi["storage_percentage"] if dharoi else None
+
+    # Calculate supply-weighted composite percentage
+    # Standard AMC water supply allocation: Narmada Main Canal (~80%), Sabarmati/Dharoi (~20%)
+    if s_pct is not None and d_pct is not None:
+        composite_pct = round((0.80 * s_pct) + (0.20 * d_pct), 1)
+        s_cap = sardar.get("total_capacity_bcm") or 0.0
+        d_cap = dharoi.get("total_capacity_bcm") or 0.0
+        s_stor = sardar.get("current_live_storage_bcm") or 0.0
+        d_stor = dharoi.get("current_live_storage_bcm") or 0.0
+        total_cap = s_cap + d_cap
+        total_stor = s_stor + d_stor
+        cap_weighted_pct = round((total_stor / total_cap * 100.0), 1) if total_cap > 0 else composite_pct
+    elif s_pct is not None:
+        composite_pct = round(s_pct, 1)
+        cap_weighted_pct = composite_pct
+    else:
+        composite_pct = round(d_pct, 1)
+        cap_weighted_pct = composite_pct
+
+    any_stale = (sardar.get("is_stale", 0) == 1 if sardar else True) or (dharoi.get("is_stale", 0) == 1 if dharoi else True)
+    latest_obs_date = max([r["observation_date"] for r in (sardar, dharoi) if r is not None])
+
+    freshness_status = "HISTORICAL_STALE" if any_stale else "RECENT_VERIFIED_OBSERVATION"
+
+    return {
+        "status": "SUCCESS",
+        "city": "Ahmedabad",
+        "composite_storage_pct": composite_pct,
+        "capacity_weighted_storage_pct": cap_weighted_pct,
+        "supply_weighting_rule": "80% Sardar Sarovar (Narmada Canal Main Lifeline) + 20% Dharoi (Sabarmati)",
+        "has_measured_data": True,
+        "is_live": False,  # CRITICAL: Official CWC bulletins are verified observational reports, not live SCADA telemetry
+        "is_stale": any_stale,
+        "data_freshness": freshness_status,
+        "latest_observation_date": latest_obs_date,
+        "reservoirs": {
+            "sardar_sarovar": sardar,
+            "dharoi": dharoi
+        },
+        "source": "Central Water Commission (CWC) Weekly Reservoir Storage Bulletin / Gujarat NWRWS",
+        "provenance": "OFFICIAL_CWC_BULLETIN",
+        "spatial_disclaimer": "Reservoir metrics reflect bulk surface water availability in major upstream storage reservoirs supplying Ahmedabad; not municipal distribution pipe pressure."
+    }
+
+
+def seed_reservoir_data(csv_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Seeds reservoir observations into SQLite from raw CSV if table is currently empty.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM reservoir_observations;")
+    existing_count = cursor.fetchone()[0]
+    conn.close()
+
+    if existing_count > 0:
+        return {
+            "status": "ALREADY_SEEDED",
+            "existing_records": existing_count,
+            "message": "Reservoir observations table already populated. Skipping duplicate seed."
+        }
+
+    from backend.data_sources.reservoir_parser import ReservoirParser
+    parser = ReservoirParser(csv_path)
+    res = parser.parse()
+
+    if not res.get("success"):
+        return {
+            "status": "PARSE_ERROR",
+            "error": res.get("error", "Unknown parse error")
+        }
+
+    inserted, skipped = insert_reservoir_observations(res["valid_records"])
+    return {
+        "status": "SUCCESS_SEEDED",
+        "total_parsed": res["valid_records_count"],
+        "inserted_records": inserted,
+        "skipped_duplicates": skipped,
+        "unique_reservoirs": res["reservoirs_count"]
+    }
+
+
 # Auto-initialize and seed when module loaded
 init_db()
 seed_baseline_data()
+seed_groundwater_data()
+seed_reservoir_data()
+
+
 

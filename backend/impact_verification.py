@@ -506,7 +506,6 @@ def list_verifications(
         results.append(d)
     return results
 
-
 # ===========================================================================
 # ClimateShield - Core Impact Verification Engine
 # Evaluates and reports observed physical and operational changes associated with
@@ -2430,6 +2429,7 @@ def export_learning_loop_signals(
                 "created_at": r.get("created_at"),
                 "updated_at": r.get("updated_at")
             })
+
 
     return signals
 
