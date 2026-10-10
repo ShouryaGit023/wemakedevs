@@ -7,12 +7,12 @@
   "test_status": "PASSED",
   "peak_forecast_sample": {
     "timestamp": "2026-10-10T14:00",
-    "temperature_c": 35.7,
+    "temperature_c": 36.0,
     "relative_humidity": 30,
-    "solar_radiation_wm2": 741.9,
-    "wind_speed_ms": 9.5,
-    "swbgt_c": 31.05,
-    "wbgt_outdoor_c": 28.68,
+    "solar_radiation_wm2": 745.7,
+    "wind_speed_ms": 9.2,
+    "swbgt_c": 31.33,
+    "wbgt_outdoor_c": 28.95,
     "risk": {
       "tier": "MODERATE",
       "color": "#F59E0B",
@@ -28,7 +28,7 @@
       "outdoor_labor_ratio": 0.75,
       "elderly_ratio": 0.2,
       "baseline_heat_risk": 0.92,
-      "effective_wbgt_c": 28.11,
+      "effective_wbgt_c": 28.37,
       "current_risk_level": "MODERATE",
       "risk_color": "#F59E0B",
       "vulnerability_score": 0.92
@@ -40,7 +40,7 @@
       "outdoor_labor_ratio": 0.7,
       "elderly_ratio": 0.18,
       "baseline_heat_risk": 0.88,
-      "effective_wbgt_c": 27.82,
+      "effective_wbgt_c": 28.08,
       "current_risk_level": "MODERATE",
       "risk_color": "#F59E0B",
       "vulnerability_score": 0.88
@@ -52,7 +52,7 @@
       "outdoor_labor_ratio": 0.6,
       "elderly_ratio": 0.25,
       "baseline_heat_risk": 0.78,
-      "effective_wbgt_c": 27.1,
+      "effective_wbgt_c": 27.36,
       "current_risk_level": "MODERATE",
       "risk_color": "#F59E0B",
       "vulnerability_score": 0.78
@@ -64,7 +64,7 @@
       "outdoor_labor_ratio": 0.65,
       "elderly_ratio": 0.22,
       "baseline_heat_risk": 0.84,
-      "effective_wbgt_c": 27.53,
+      "effective_wbgt_c": 27.79,
       "current_risk_level": "MODERATE",
       "risk_color": "#F59E0B",
       "vulnerability_score": 0.84
@@ -76,7 +76,7 @@
       "outdoor_labor_ratio": 0.45,
       "elderly_ratio": 0.35,
       "baseline_heat_risk": 0.72,
-      "effective_wbgt_c": 26.67,
+      "effective_wbgt_c": 26.92,
       "current_risk_level": "MODERATE",
       "risk_color": "#F59E0B",
       "vulnerability_score": 0.72
@@ -88,7 +88,7 @@
       "outdoor_labor_ratio": 0.68,
       "elderly_ratio": 0.19,
       "baseline_heat_risk": 0.81,
-      "effective_wbgt_c": 27.32,
+      "effective_wbgt_c": 27.57,
       "current_risk_level": "MODERATE",
       "risk_color": "#F59E0B",
       "vulnerability_score": 0.81
@@ -100,7 +100,7 @@
       "outdoor_labor_ratio": 0.72,
       "elderly_ratio": 0.17,
       "baseline_heat_risk": 0.86,
-      "effective_wbgt_c": 27.68,
+      "effective_wbgt_c": 27.94,
       "current_risk_level": "MODERATE",
       "risk_color": "#F59E0B",
       "vulnerability_score": 0.86
@@ -112,7 +112,7 @@
       "outdoor_labor_ratio": 0.35,
       "elderly_ratio": 0.28,
       "baseline_heat_risk": 0.55,
-      "effective_wbgt_c": 25.45,
+      "effective_wbgt_c": 25.69,
       "current_risk_level": "LOW",
       "risk_color": "#10B981",
       "vulnerability_score": 0.55
@@ -124,7 +124,7 @@
       "outdoor_labor_ratio": 0.3,
       "elderly_ratio": 0.3,
       "baseline_heat_risk": 0.5,
-      "effective_wbgt_c": 25.09,
+      "effective_wbgt_c": 25.33,
       "current_risk_level": "LOW",
       "risk_color": "#10B981",
       "vulnerability_score": 0.5
@@ -136,7 +136,7 @@
       "outdoor_labor_ratio": 0.58,
       "elderly_ratio": 0.21,
       "baseline_heat_risk": 0.7,
-      "effective_wbgt_c": 26.53,
+      "effective_wbgt_c": 26.78,
       "current_risk_level": "MODERATE",
       "risk_color": "#F59E0B",
       "vulnerability_score": 0.7

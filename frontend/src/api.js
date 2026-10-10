@@ -187,5 +187,41 @@ export const api = {
   getWards: async () => {
     const res = await fetch(`${API_BASE}/wards`);
     return await handleResponse(res);
+  },
+
+  // Amazon Bedrock AI Advisory
+  getBedrockStatus: async () => {
+    const res = await fetch(`${API_BASE}/bedrock/status`);
+    return await handleResponse(res);
+  },
+
+  generateBedrockAdvisory: async (data) => {
+    const res = await fetch(`${API_BASE}/bedrock/advisory`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    return await handleResponse(res);
+  },
+
+  // Amazon Aurora Dataset APIs
+  getAuroraStatus: async () => {
+    const res = await fetch(`${API_BASE}/aurora/status`);
+    return await handleResponse(res);
+  },
+
+  getAuroraSchema: async () => {
+    const res = await fetch(`${API_BASE}/aurora/schema`);
+    return await handleResponse(res);
+  },
+
+  exportAuroraDataset: async () => {
+    const res = await fetch(`${API_BASE}/aurora/dataset`);
+    return await handleResponse(res);
+  },
+
+  syncAuroraDataset: async () => {
+    const res = await fetch(`${API_BASE}/aurora/sync`, { method: 'POST' });
+    return await handleResponse(res);
   }
 };
