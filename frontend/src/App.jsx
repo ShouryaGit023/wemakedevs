@@ -95,8 +95,10 @@ export default function App() {
           )}
 
           {activeTab === 'learning-loop' && (
-            <div className="py-2">
-              <LearningLoopDashboard />
+            <div className="learning-loop-container p-4">
+              <LearningLoopDashboard 
+                key={`learning-loop-${refreshTrigger}`}
+              />
             </div>
           )}
 

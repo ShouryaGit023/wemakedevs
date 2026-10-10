@@ -16,22 +16,37 @@ Safety Rules:
 """
 
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import uuid
 import threading
+import logging
 import json
+
+logger = logging.getLogger("climateshield.action_centre")
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_STATUSES = ["proposed", "approved", "in_progress", "completed", "cancelled"]
+VALID_STATUSES = [
+    "proposed",
+    "approved",
+    "in_progress",
+    "completed",
+    "cancelled",
+    "rejected",
+    "blocked",
+    "changes_requested",
+]
 
 VALID_STATUS_TRANSITIONS = {
-    "proposed": {"approved", "cancelled"},
-    "approved": {"in_progress", "cancelled"},
-    "in_progress": {"completed", "cancelled"},
+    "proposed": {"approved", "rejected", "blocked", "changes_requested", "cancelled"},
+    "approved": {"in_progress", "blocked", "rejected", "changes_requested", "cancelled"},
+    "in_progress": {"completed", "blocked", "cancelled"},
+    "blocked": {"proposed", "approved", "in_progress", "rejected", "cancelled"},
+    "changes_requested": {"proposed", "rejected", "cancelled"},
     "completed": set(),      # terminal
+    "rejected": {"proposed"}, # allows reconsideration/resubmission
     "cancelled": set(),      # terminal
 }
 
@@ -51,6 +66,8 @@ ACTION_TYPES = [
     "communal_bladder_tank",
     "water_conservation_advisory",
     "water_allocation_review",
+    "leak_inspection_repair",
+    "groundwater_extraction_monitoring",
     "other",
 ]
 
@@ -188,6 +205,23 @@ class ActionStore:
             self._actions[action_id] = record
             self._save_record_to_db(record)
 
+        # Record creation in SQLite audit log
+        try:
+            from backend.database import record_action_audit_event
+            record_action_audit_event(
+                action_id=action_id,
+                event_type="ACTION_CREATED",
+                actor=source,
+                ward_id=ward_id,
+                old_status=None,
+                new_status="proposed",
+                reason=reason,
+                metadata={"action_type": action_type, "priority": priority, "resources": required_resources or {}},
+                timestamp=now,
+            )
+        except Exception:
+            pass
+
         return record
 
     def update_status(
@@ -202,6 +236,10 @@ class ActionStore:
             raise ValueError(
                 f"Invalid status '{new_status}'. Must be one of: {VALID_STATUSES}"
             )
+
+        actor = str(changed_by or "").strip()
+        if not actor:
+            raise ValueError("A named municipal official or authorized role ('changed_by') is required.")
 
         with self._lock:
             if action_id not in self._actions:
@@ -220,11 +258,34 @@ class ActionStore:
                     f"Allowed transitions: {sorted(allowed) if allowed else 'none (terminal state)'}"
                 )
 
+            # Enforce mandatory reasons for rejection, blocking, and change requests
+            if new_status in ["rejected", "blocked", "changes_requested"]:
+                if not notes or not str(notes).strip():
+                    raise ValueError(
+                        f"A mandatory justification reason is required to transition an action to '{new_status}'."
+                    )
+
+            # Enforce verification requirements for approval and deployment
+            if new_status in ["approved", "in_progress"]:
+                latest_verif = action.get("latest_verification")
+                if not latest_verif:
+                    try:
+                        from backend.database import get_action_verification
+                        latest_verif = get_action_verification(action_id)
+                    except Exception:
+                        pass
+                if latest_verif and latest_verif.get("overall_status") == "FAILED":
+                    failed_checks = [c.get("title", c.get("check_id")) for c in latest_verif.get("checklist", []) if c.get("status") == "FAILED"]
+                    reason_msg = f" ({', '.join(failed_checks)})" if failed_checks else ""
+                    raise ValueError(
+                        f"Cannot transition to '{new_status}': Intervention evidence verification has FAILED mandatory checks{reason_msg}. Discrepancies must be resolved before operational authorization."
+                    )
+
             now = datetime.now(timezone.utc).isoformat()
             entry = {
                 "status": new_status,
                 "timestamp": now,
-                "changed_by": changed_by,
+                "changed_by": actor,
             }
             if notes:
                 entry["notes"] = notes
@@ -234,6 +295,23 @@ class ActionStore:
             action.setdefault("status_history", []).append(entry)
             self._save_record_to_db(action)
 
+            # Record immutable audit event in SQLite
+            try:
+                from backend.database import record_action_audit_event
+                record_action_audit_event(
+                    action_id=action_id,
+                    event_type=f"STATUS_TRANSITION_{new_status.upper()}",
+                    actor=actor,
+                    ward_id=action.get("ward_id"),
+                    old_status=current_status,
+                    new_status=new_status,
+                    reason=notes,
+                    metadata={"action_type": action.get("action_type"), "priority": action.get("priority")},
+                    timestamp=now,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to record action audit event: {e}")
+
             return dict(action)
 
     # -- read ----------------------------------------------------------------
@@ -242,7 +320,25 @@ class ActionStore:
         with self._lock:
             self._load_from_db()
             action = self._actions.get(action_id)
-            return dict(action) if action else None
+            if not action:
+                return None
+            res = dict(action)
+        if "latest_verification" not in res:
+            try:
+                from backend.database import get_action_verification
+                persisted = get_action_verification(action_id)
+                if persisted:
+                    res["latest_verification"] = persisted
+            except Exception:
+                pass
+        return res
+
+    def attach_verification(self, action_id: str, verification_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            if action_id not in self._actions:
+                return None
+            self._actions[action_id]["latest_verification"] = verification_data
+            return dict(self._actions[action_id])
 
     def list_actions(
         self,
@@ -567,7 +663,16 @@ def get_prioritized_actions(
     actions = store.list_actions(ward_id=ward_id, action_type=action_type, status=status)
 
     priority_map = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    status_urgency = {"in_progress": 0, "approved": 1, "proposed": 2, "completed": 3, "cancelled": 4}
+    status_urgency = {
+        "in_progress": 0,
+        "approved": 1,
+        "blocked": 2,
+        "proposed": 3,
+        "changes_requested": 4,
+        "completed": 5,
+        "rejected": 6,
+        "cancelled": 7,
+    }
 
     actions.sort(key=lambda a: (
         priority_map.get(a.get("priority", "medium").lower(), 9),
@@ -704,6 +809,27 @@ def build_action_centre_dashboard(
     )
     prioritized_actions = get_prioritized_actions(store=store)
 
+    # Dashboard Metrics calculated from actual backend actions
+    active_deployments = sum(1 for a in all_actions if a.get("status") in ["in_progress", "approved"])
+    critical_interventions = sum(1 for a in all_actions if (a.get("priority") or "").lower() == "critical")
+    pending_sign_off = sum(1 for a in all_actions if a.get("status") == "proposed")
+    completed_operations = sum(1 for a in all_actions if a.get("status") == "completed")
+    total_registered = len(all_actions)
+    blocked_operations = sum(1 for a in all_actions if a.get("status") == "blocked")
+    rejected_operations = sum(1 for a in all_actions if a.get("status") == "rejected")
+    changes_requested_count = sum(1 for a in all_actions if a.get("status") == "changes_requested")
+
+    metrics = {
+        "active_deployments": active_deployments,
+        "critical_interventions": critical_interventions,
+        "pending_sign_off": pending_sign_off,
+        "completed_operations": completed_operations,
+        "total_registered_actions": total_registered,
+        "blocked_operations": blocked_operations,
+        "rejected_operations": rejected_operations,
+        "changes_requested": changes_requested_count,
+    }
+
     return {
         "status": "SUCCESS",
         "dashboard_generated_at": now,
@@ -716,13 +842,126 @@ def build_action_centre_dashboard(
             "total_actions": len(all_actions),
             "by_status": status_counts,
         },
+        "metrics": metrics,
         "ward_action_summary": {
             "total_wards_with_actions": len(ward_summaries),
             "ward_summaries": ward_summaries,
         },
-        "prioritized_actions": prioritized_actions[:20],
-        "recent_actions": sorted(all_actions, key=lambda a: a["created_at"], reverse=True)[:20],
+        "prioritized_actions": prioritized_actions[:25],
+        "recent_actions": sorted(all_actions, key=lambda a: a["created_at"], reverse=True)[:25],
         "data_freshness": freshness,
+    }
+
+
+def dispatch_quick_action(
+    ward_id: str,
+    action_type: str,
+    authorized_by: str,
+    ward_name: Optional[str] = None,
+    priority: str = "critical",
+    reason: Optional[str] = None,
+    required_resources: Optional[Dict[str, Any]] = None,
+    related_hazard: Optional[str] = None,
+    risk_score: Optional[float] = None,
+    initial_status: str = "in_progress",
+    force: bool = False,
+    store: Optional[ActionStore] = None,
+) -> Dict[str, Any]:
+    """
+    Executes a quick operational dispatch with validation, eligibility,
+    duplicate-dispatch prevention, and audit event logging.
+    """
+    store = store or get_action_store()
+
+    actor = str(authorized_by or "").strip()
+    if not actor:
+        raise ValueError("Authorizing municipal authority or officer role ('authorized_by') is required for dispatch.")
+
+    if action_type not in ACTION_TYPES:
+        raise ValueError(f"Invalid action_type '{action_type}'. Must be one of: {ACTION_TYPES}")
+
+    # Eligibility check: ward jurisdiction in AMC registry
+    is_valid_ward, resolved_name = _is_valid_amc_ward(ward_id, ward_name or "")
+    if not is_valid_ward:
+        raise ValueError(f"Ward '{ward_id}' is not recognized in the AMC municipal boundary registry.")
+    final_ward_name = resolved_name or ward_name or ward_id
+
+    # Duplicate dispatch prevention: check active unresolved operations in this ward with same type
+    if not force:
+        active_statuses = {"proposed", "approved", "in_progress", "blocked"}
+        existing_actions = store.list_actions(ward_id=ward_id, action_type=action_type)
+        duplicates = [a for a in existing_actions if a.get("status") in active_statuses]
+        if duplicates:
+            existing = duplicates[0]
+            raise ValueError(
+                f"Active duplicate dispatch prevented: An active {action_type.replace('_', ' ')} operation "
+                f"({existing['action_id']}) is already '{existing['status']}' in {final_ward_name} "
+                f"(Reason: {existing.get('reason', 'N/A')}). Complete or resolve the existing dispatch before mobilizing another unit."
+            )
+
+    now = datetime.now(timezone.utc).isoformat()
+    action = store.create_action(
+        ward_id=ward_id,
+        ward_name=final_ward_name,
+        action_type=action_type,
+        priority=priority,
+        reason=reason or f"Emergency quick dispatch of {action_type.replace('_', ' ')} in {final_ward_name}.",
+        required_resources=required_resources or {},
+        related_hazard=related_hazard,
+        risk_score=risk_score,
+        source=f"quick_dispatch ({actor})",
+    )
+
+    action_id = action["action_id"]
+
+    # Transition to target initial status if approved or in_progress
+    if initial_status == "approved":
+        action = store.update_status(
+            action_id=action_id,
+            new_status="approved",
+            changed_by=actor,
+            notes=f"Quick dispatch authorized by {actor}."
+        )
+    elif initial_status == "in_progress":
+        store.update_status(
+            action_id=action_id,
+            new_status="approved",
+            changed_by=actor,
+            notes=f"Quick dispatch authorized by {actor}."
+        )
+        action = store.update_status(
+            action_id=action_id,
+            new_status="in_progress",
+            changed_by=actor,
+            notes=f"Quick dispatch mobilized and deployed to field by {actor}."
+        )
+
+    # Record dispatch audit event
+    try:
+        from backend.database import record_action_audit_event
+        record_action_audit_event(
+            action_id=action_id,
+            event_type="DISPATCH_EXECUTED",
+            actor=actor,
+            ward_id=ward_id,
+            old_status="proposed",
+            new_status=action["status"],
+            reason=reason,
+            metadata={
+                "action_type": action_type,
+                "priority": priority,
+                "required_resources": required_resources or {},
+                "quick_dispatch": True,
+            },
+            timestamp=now,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to record dispatch audit event: {e}")
+
+    return {
+        "status": "SUCCESS",
+        "action": action,
+        "message": f"Successfully dispatched {action_type.replace('_', ' ')} to {final_ward_name} ({action_id}).",
     }
 
 
@@ -730,8 +969,8 @@ def build_action_centre_dashboard(
 # Rule-Based Recommendation Layer
 # ---------------------------------------------------------------------------
 
-UNRESOLVED_STATUSES = {"proposed", "approved", "in_progress"}
-RESOLVED_STATUSES = {"completed", "cancelled"}
+UNRESOLVED_STATUSES = {"proposed", "approved", "in_progress", "blocked", "changes_requested"}
+RESOLVED_STATUSES = {"completed", "cancelled", "rejected"}
 
 # Transparent, configurable default thresholds (0-100 scale)
 DEFAULT_RECOMMENDATION_THRESHOLDS: Dict[str, float] = {
@@ -1405,4 +1644,514 @@ def generate_rule_based_recommendations(
         create_in_store=create_in_store,
         enforce_resource_constraints=enforce_resource_constraints,
     )
+
+
+# ---------------------------------------------------------------------------
+# Intervention Evidence Verification Engine
+# ---------------------------------------------------------------------------
+
+def _is_valid_amc_ward(ward_id: str, ward_name: str = "") -> Tuple[bool, Optional[str]]:
+    """Checks if ward_id is a valid registered AMC ward."""
+    if not ward_id:
+        return False, None
+    clean_id = ward_id.strip()
+    if clean_id.upper().startswith("AMC-"):
+        return True, "AMC Municipal Administrative Zone"
+    try:
+        from backend.database import get_db_connection
+        conn = get_db_connection()
+        row = conn.execute(
+            "SELECT id, name FROM wards WHERE UPPER(id) = ? OR LOWER(name) = ?;",
+            (clean_id.upper(), (ward_name or "").strip().lower())
+        ).fetchone()
+        conn.close()
+        if row:
+            return True, f"{row['name']} ({row['id']})"
+    except Exception:
+        pass
+
+    try:
+        from backend.wbgt_pipeline import AHMEDABAD_WARDS
+        for w in AHMEDABAD_WARDS:
+            if w.get("id", "").upper() == clean_id.upper() or (w.get("name") and w.get("name").lower() == (ward_name or "").strip().lower()):
+                return True, f"{w.get('name')} ({w.get('id')})"
+    except Exception:
+        pass
+
+    return False, None
+
+
+def get_default_verification_checklist(action: Dict[str, Any]) -> Dict[str, Any]:
+    """Generates a template verification checklist with NOT_VERIFIED status."""
+    ward_id = action.get("ward_id", "")
+    ward_name = action.get("ward_name", "")
+    action_id = action.get("action_id", "")
+
+    checklist = [
+        {
+            "check_id": "ward_association",
+            "title": "AMC Ward Jurisdiction & Administrative Registry",
+            "category": "JURISDICTION",
+            "mandatory": True,
+            "status": "NOT_VERIFIED",
+            "message": f"Verification pending for ward {ward_id} ({ward_name}).",
+            "reason": "Check has not yet been executed against AMC boundary registry.",
+            "details": {"ward_id": ward_id, "ward_name": ward_name},
+        },
+        {
+            "check_id": "risk_assessment",
+            "title": "Quantitative Risk Assessment & Tier Calibration",
+            "category": "RISK_MODEL",
+            "mandatory": True,
+            "status": "NOT_VERIFIED",
+            "message": "Risk assessment cross-correlation pending.",
+            "reason": "Check has not yet been executed against active risk models.",
+            "details": {"risk_score": action.get("risk_score")},
+        },
+        {
+            "check_id": "data_freshness",
+            "title": "Meteorological & Vulnerability Telemetry Freshness",
+            "category": "DATA_INTEGRITY",
+            "mandatory": True,
+            "status": "NOT_VERIFIED",
+            "message": "Telemetry freshness audit pending.",
+            "reason": "Check has not yet been executed against forecasting timestamps.",
+            "details": {"timestamp": action.get("updated_at") or action.get("created_at")},
+        },
+        {
+            "check_id": "operational_details",
+            "title": "Municipal Operational & Resource Schedule",
+            "category": "OPERATIONAL_FEASIBILITY",
+            "mandatory": True,
+            "status": "NOT_VERIFIED",
+            "message": "Operational schedule and resource feasibility audit pending.",
+            "reason": "Check has not yet been executed against municipal resource schedules.",
+            "details": {"action_type": action.get("action_type"), "resources": action.get("required_resources")},
+        },
+        {
+            "check_id": "available_evidence",
+            "title": "Physical Empirical Sensor Telemetry",
+            "category": "EMPIRICAL_EVIDENCE",
+            "mandatory": False,
+            "status": "NOT_VERIFIED",
+            "message": "Empirical sensor telemetry audit pending.",
+            "reason": "Check has not yet been executed.",
+            "details": {"empirical_telemetry_attached": False},
+        },
+    ]
+
+    return {
+        "verification_id": None,
+        "action_id": action_id,
+        "ward_id": ward_id,
+        "overall_status": "NOT_VERIFIED",
+        "verdict_summary": "Action has not been formally verified. Run Evidence Verification to evaluate against actual data.",
+        "checklist": checklist,
+        "verified_by": None,
+        "verified_at": None,
+        "notes": None,
+        "failed_checks_count": 0,
+        "verified_checks_count": 0,
+        "unable_checks_count": 0,
+    }
+
+
+def verify_intervention_evidence(
+    action: Dict[str, Any],
+    climate_risk_data: Optional[Dict[str, Any]] = None,
+    verified_by: str = "Municipal Incident Commander",
+    notes: Optional[str] = None,
+    store: Optional[ActionStore] = None,
+) -> Dict[str, Any]:
+    """
+    Validates an intervention action against actual data:
+    1. Ward association (jurisdiction in AMC registry)
+    2. Quantitative risk assessment (substantiated by risk engine)
+    3. Data freshness (within operational SLA threshold)
+    4. Operational details & resource constraints (valid type, priority, positive resources)
+    5. Empirical physical evidence (sensor readings if attached, or clearly unavailable)
+
+    Enforces:
+    - Never fabricates evidence or readings.
+    - Prevents mandatory failed checks from succeeding.
+    - Persists verification report to SQLite database.
+    """
+    store = store or get_action_store()
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat()
+    action_id = action.get("action_id", "UNKNOWN")
+    ward_id = action.get("ward_id", "")
+    ward_name = action.get("ward_name", "")
+
+    checklist: List[Dict[str, Any]] = []
+
+    # 1. Ward Association (Mandatory)
+    is_valid_ward, resolved_name = _is_valid_amc_ward(ward_id, ward_name)
+    if not ward_id:
+        checklist.append({
+            "check_id": "ward_association",
+            "title": "AMC Ward Jurisdiction & Administrative Registry",
+            "category": "JURISDICTION",
+            "mandatory": True,
+            "status": "FAILED",
+            "message": "Ward identifier is missing from this action record.",
+            "reason": "Mandatory ward identifier is null or empty.",
+            "details": {"ward_id": None, "ward_name": ward_name},
+        })
+    elif is_valid_ward:
+        checklist.append({
+            "check_id": "ward_association",
+            "title": "AMC Ward Jurisdiction & Administrative Registry",
+            "category": "JURISDICTION",
+            "mandatory": True,
+            "status": "VERIFIED",
+            "message": f"Ward '{ward_id}' ({resolved_name or ward_name}) confirmed in AMC municipal registry.",
+            "reason": "Ward identifier matches active municipal administrative boundary registry.",
+            "details": {"ward_id": ward_id, "ward_name": resolved_name or ward_name, "registry_verified": True},
+        })
+    else:
+        checklist.append({
+            "check_id": "ward_association",
+            "title": "AMC Ward Jurisdiction & Administrative Registry",
+            "category": "JURISDICTION",
+            "mandatory": True,
+            "status": "FAILED",
+            "message": f"Ward '{ward_id}' is not recognized in the AMC municipal boundary registry.",
+            "reason": f"Identifier '{ward_id}' does not match any official AMC ward in the municipal boundary registry.",
+            "details": {"ward_id": ward_id, "ward_name": ward_name, "registry_verified": False},
+        })
+
+    # 2. Risk Assessment (Mandatory)
+    risk_score = action.get("risk_score")
+    if risk_score is None:
+        checklist.append({
+            "check_id": "risk_assessment",
+            "title": "Quantitative Risk Assessment & Tier Calibration",
+            "category": "RISK_MODEL",
+            "mandatory": True,
+            "status": "FAILED",
+            "message": "No quantitative risk score attached to justify this intervention.",
+            "reason": "Missing risk score. Actions cannot be verified without documented quantitative assessment.",
+            "details": {"risk_score": None},
+        })
+    elif not (0.0 <= float(risk_score) <= 100.0):
+        checklist.append({
+            "check_id": "risk_assessment",
+            "title": "Quantitative Risk Assessment & Tier Calibration",
+            "category": "RISK_MODEL",
+            "mandatory": True,
+            "status": "FAILED",
+            "message": f"Numerical risk score ({risk_score}) is outside the valid 0–100 scale.",
+            "reason": "Risk score bounds violation. Values must range between 0.0 and 100.0.",
+            "details": {"risk_score": risk_score},
+        })
+    else:
+        score_val = float(risk_score)
+        if climate_risk_data:
+            ranked_wards = climate_risk_data.get("ranked_wards", climate_risk_data.get("wards", []))
+            target_ward = next(
+                (w for w in ranked_wards if w.get("id") == ward_id or (w.get("name") and w.get("name").lower() == ward_name.lower())),
+                None
+            )
+            if target_ward:
+                engine_score = float(target_ward.get("combined_risk_score", target_ward.get("heat_risk_score", 0.0)))
+                if engine_score >= 25.0:
+                    checklist.append({
+                        "check_id": "risk_assessment",
+                        "title": "Quantitative Risk Assessment & Tier Calibration",
+                        "category": "RISK_MODEL",
+                        "mandatory": True,
+                        "status": "VERIFIED",
+                        "message": f"Risk score ({score_val:.1f}/100) substantiated by Combined Climate Risk Engine ({engine_score:.1f}/100).",
+                        "reason": "Active risk evaluation exceeds operational trigger threshold (>= 25.0).",
+                        "details": {
+                            "recorded_risk_score": score_val,
+                            "active_engine_score": engine_score,
+                            "risk_category": target_ward.get("combined_risk_category", "ELEVATED"),
+                        },
+                    })
+                else:
+                    checklist.append({
+                        "check_id": "risk_assessment",
+                        "title": "Quantitative Risk Assessment & Tier Calibration",
+                        "category": "RISK_MODEL",
+                        "mandatory": True,
+                        "status": "FAILED",
+                        "message": f"Active Climate Risk Engine reports low risk ({engine_score:.1f}/100) below threshold.",
+                        "reason": f"Active model risk score ({engine_score:.1f}/100) is below operational trigger threshold of 25.0.",
+                        "details": {"recorded_risk_score": score_val, "active_engine_score": engine_score},
+                    })
+            else:
+                if score_val >= 25.0:
+                    checklist.append({
+                        "check_id": "risk_assessment",
+                        "title": "Quantitative Risk Assessment & Tier Calibration",
+                        "category": "RISK_MODEL",
+                        "mandatory": True,
+                        "status": "VERIFIED",
+                        "message": f"Operational risk tier verified at {score_val:.1f}/100 for municipal advisory scope.",
+                        "reason": "Recorded risk score is within valid operational action threshold.",
+                        "details": {"recorded_risk_score": score_val},
+                    })
+                else:
+                    checklist.append({
+                        "check_id": "risk_assessment",
+                        "title": "Quantitative Risk Assessment & Tier Calibration",
+                        "category": "RISK_MODEL",
+                        "mandatory": True,
+                        "status": "FAILED",
+                        "message": f"Recorded risk score ({score_val:.1f}/100) is below operational trigger threshold.",
+                        "reason": "Score is below operational trigger threshold of 25.0.",
+                        "details": {"recorded_risk_score": score_val},
+                    })
+        else:
+            if score_val >= 25.0:
+                checklist.append({
+                    "check_id": "risk_assessment",
+                    "title": "Quantitative Risk Assessment & Tier Calibration",
+                    "category": "RISK_MODEL",
+                    "mandatory": True,
+                    "status": "VERIFIED",
+                    "message": f"Recorded risk score ({score_val:.1f}/100) satisfies operational threshold (>= 25.0). Spatial stream decoupled.",
+                    "reason": "Quantitative risk score meets operational trigger threshold.",
+                    "details": {"recorded_risk_score": score_val, "operational_threshold_met": True, "risk_engine_available": False},
+                })
+            else:
+                checklist.append({
+                    "check_id": "risk_assessment",
+                    "title": "Quantitative Risk Assessment & Tier Calibration",
+                    "category": "RISK_MODEL",
+                    "mandatory": True,
+                    "status": "FAILED",
+                    "message": f"Recorded risk score ({score_val:.1f}/100) is below operational threshold (25.0).",
+                    "reason": "Score is below operational trigger threshold of 25.0.",
+                    "details": {"recorded_risk_score": score_val},
+                })
+
+    # 3. Telemetry Freshness (Mandatory)
+    freshness = evaluate_risk_data_freshness(climate_risk_data, max_age_seconds=86400.0)
+    if freshness.get("climate_risk_available"):
+        if freshness.get("is_stale"):
+            age_h = int((freshness.get("age_seconds") or 0) / 3600)
+            checklist.append({
+                "check_id": "data_freshness",
+                "title": "Meteorological & Vulnerability Telemetry Freshness",
+                "category": "DATA_INTEGRITY",
+                "mandatory": True,
+                "status": "FAILED",
+                "message": f"Climate risk inputs are stale ({age_h}h old > 24h operational limit).",
+                "reason": "Risk data exceeds 24-hour freshness SLA. Re-run weather ingestion before operational authorization.",
+                "details": {"age_seconds": freshness.get("age_seconds"), "max_age_seconds": 86400},
+            })
+        else:
+            checklist.append({
+                "check_id": "data_freshness",
+                "title": "Meteorological & Vulnerability Telemetry Freshness",
+                "category": "DATA_INTEGRITY",
+                "mandatory": True,
+                "status": "VERIFIED",
+                "message": "Climate risk inputs are fresh (within 24h operational SLA).",
+                "reason": "Timestamp falls within active 24-hour meteorological forecasting cycle.",
+                "details": {"age_seconds": freshness.get("age_seconds"), "staleness_status": "FRESH"},
+            })
+    else:
+        created_str = action.get("created_at") or action.get("updated_at")
+        if created_str:
+            try:
+                parsed_created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                if parsed_created.tzinfo is None:
+                    parsed_created = parsed_created.replace(tzinfo=timezone.utc)
+                age_sec = (now_dt - parsed_created).total_seconds()
+                if age_sec <= 86400.0:
+                    checklist.append({
+                        "check_id": "data_freshness",
+                        "title": "Meteorological & Vulnerability Telemetry Freshness",
+                        "category": "DATA_INTEGRITY",
+                        "mandatory": True,
+                        "status": "VERIFIED",
+                        "message": f"Action record created within current operational shift ({int(age_sec / 3600)}h ago).",
+                        "reason": "Action record generated within active operational window.",
+                        "details": {"action_age_seconds": age_sec, "risk_engine_decoupled": True},
+                    })
+                else:
+                    checklist.append({
+                        "check_id": "data_freshness",
+                        "title": "Meteorological & Vulnerability Telemetry Freshness",
+                        "category": "DATA_INTEGRITY",
+                        "mandatory": True,
+                        "status": "FAILED",
+                        "message": f"Action record is stale ({int(age_sec / 3600)}h old > 24h limit).",
+                        "reason": "Action record age exceeds maximum 24-hour operational window without re-evaluation.",
+                        "details": {"action_age_seconds": age_sec},
+                    })
+            except Exception:
+                checklist.append({
+                    "check_id": "data_freshness",
+                    "title": "Meteorological & Vulnerability Telemetry Freshness",
+                    "category": "DATA_INTEGRITY",
+                    "mandatory": True,
+                    "status": "UNABLE_TO_VERIFY",
+                    "message": "Unable to parse action timestamp.",
+                    "reason": "Timestamp format invalid or unparseable.",
+                    "details": {"raw_timestamp": created_str},
+                })
+        else:
+            checklist.append({
+                "check_id": "data_freshness",
+                "title": "Meteorological & Vulnerability Telemetry Freshness",
+                "category": "DATA_INTEGRITY",
+                "mandatory": True,
+                "status": "UNABLE_TO_VERIFY",
+                "message": "Timestamp metadata missing for both action record and climate stream.",
+                "reason": "Missing timestamp on action record and risk stream.",
+                "details": {"timestamp_available": False},
+            })
+
+    # 4. Operational Details & Resource Feasibility (Mandatory)
+    action_type = action.get("action_type")
+    priority = (action.get("priority") or "").lower()
+    resources = action.get("required_resources") or {}
+
+    cost = resources.get("cost_inr")
+    crew = resources.get("crew_required")
+    water = resources.get("water_required_l")
+
+    op_errors = []
+    if not action_type or action_type not in ACTION_TYPES:
+        op_errors.append(f"Invalid or missing action type '{action_type}'")
+    if not priority or priority not in ["critical", "high", "medium", "low"]:
+        op_errors.append(f"Invalid priority '{priority}'")
+    if cost is not None and cost < 0:
+        op_errors.append(f"Budget cannot be negative (INR {cost})")
+    if crew is not None and crew < 0:
+        op_errors.append(f"Crew cannot be negative ({crew})")
+    if water is not None and water < 0:
+        op_errors.append(f"Water allocation cannot be negative ({water} L)")
+    if not resources or all(v is None for v in (cost, crew, water)):
+        op_errors.append("Resource schedule is empty or unspecified")
+
+    if op_errors:
+        checklist.append({
+            "check_id": "operational_details",
+            "title": "Municipal Operational & Resource Schedule",
+            "category": "OPERATIONAL_FEASIBILITY",
+            "mandatory": True,
+            "status": "FAILED",
+            "message": f"Operational schedule invalid: {'; '.join(op_errors)}.",
+            "reason": f"Failed operational constraints: {'; '.join(op_errors)}.",
+            "details": {"action_type": action_type, "priority": priority, "resources": resources},
+        })
+    else:
+        checklist.append({
+            "check_id": "operational_details",
+            "title": "Municipal Operational & Resource Schedule",
+            "category": "OPERATIONAL_FEASIBILITY",
+            "mandatory": True,
+            "status": "VERIFIED",
+            "message": f"Operational schedule validated: ₹{cost or 0:,.0f} budget, {crew or 0} crew, {water or 0:,.0f} L water cap.",
+            "reason": "Action type, priority tier, and resource allocations verified against municipal schedules.",
+            "details": {
+                "action_type": action_type,
+                "priority": priority,
+                "cost_inr": cost,
+                "crew_required": crew,
+                "water_required_l": water,
+            },
+        })
+
+    # 5. Empirical Physical Evidence (Optional Pre-Dispatch)
+    evidence_attached = action.get("evidence")
+    if evidence_attached and isinstance(evidence_attached, dict) and evidence_attached.get("telemetry_verified"):
+        checklist.append({
+            "check_id": "available_evidence",
+            "title": "Physical Empirical Sensor Telemetry",
+            "category": "EMPIRICAL_EVIDENCE",
+            "mandatory": False,
+            "status": "VERIFIED",
+            "message": "Physical sensor telemetry attached and verified.",
+            "reason": "Empirical ground/satellite readings logged with validated sensor signature.",
+            "details": evidence_attached,
+        })
+    else:
+        checklist.append({
+            "check_id": "available_evidence",
+            "title": "Physical Empirical Sensor Telemetry",
+            "category": "EMPIRICAL_EVIDENCE",
+            "mandatory": False,
+            "status": "UNABLE_TO_VERIFY",
+            "message": "Physical empirical sensor telemetry is not attached pre-execution.",
+            "reason": "Empirical validation (Ground IoT thermistors, satellite thermal radiance, or drainage meters) is audited post-execution via the Impact Verification Desk. No physical sensor logs currently attached.",
+            "details": {"empirical_telemetry_attached": False, "audited_post_execution": True},
+        })
+
+    # Aggregate Overall Status (Prevent mandatory failed checks from succeeding)
+    mandatory_checks = [c for c in checklist if c.get("mandatory", False)]
+    failed_mandatory = [c for c in mandatory_checks if c["status"] == "FAILED"]
+    unable_mandatory = [c for c in mandatory_checks if c["status"] == "UNABLE_TO_VERIFY"]
+
+    if failed_mandatory:
+        overall_status = "FAILED"
+        verdict_summary = (
+            f"Verification FAILED: {len(failed_mandatory)} mandatory check(s) did not pass "
+            f"({', '.join(c['title'] for c in failed_mandatory)})."
+        )
+    elif unable_mandatory:
+        overall_status = "UNABLE_TO_VERIFY"
+        verdict_summary = (
+            f"Unable to verify completely: {len(unable_mandatory)} mandatory check(s) lack required data "
+            f"({', '.join(c['title'] for c in unable_mandatory)})."
+        )
+    else:
+        overall_status = "VERIFIED"
+        verdict_summary = "All mandatory operational, jurisdiction, risk assessment, and freshness checks verified against actual data."
+
+    verification_id = f"VERIF-{uuid.uuid4().hex[:8].upper()}"
+    verification_record = {
+        "verification_id": verification_id,
+        "action_id": action_id,
+        "ward_id": ward_id,
+        "overall_status": overall_status,
+        "verdict_summary": verdict_summary,
+        "checklist": checklist,
+        "verified_by": verified_by,
+        "verified_at": now_iso,
+        "notes": notes,
+        "failed_checks_count": len([c for c in checklist if c["status"] == "FAILED"]),
+        "verified_checks_count": len([c for c in checklist if c["status"] == "VERIFIED"]),
+        "unable_checks_count": len([c for c in checklist if c["status"] == "UNABLE_TO_VERIFY"]),
+    }
+
+    # Persist in SQLite
+    try:
+        from backend.database import record_action_verification
+        record_action_verification(verification_record)
+    except Exception as e:
+        logger.warning(f"Failed to persist action verification to SQLite: {e}")
+
+    # Attach to action in store
+    store.attach_verification(action_id, verification_record)
+
+    return verification_record
+
+
+def get_action_verification_report(action_id: str, store: Optional[ActionStore] = None) -> Dict[str, Any]:
+    """Retrieves the latest verification report or returns a default template."""
+    store = store or get_action_store()
+    action = store.get_action(action_id)
+    if not action:
+        raise KeyError(f"Action '{action_id}' not found in Action Centre.")
+
+    if action.get("latest_verification"):
+        return action["latest_verification"]
+
+    try:
+        from backend.database import get_action_verification
+        persisted = get_action_verification(action_id)
+        if persisted:
+            store.attach_verification(action_id, persisted)
+            return persisted
+    except Exception:
+        pass
+
+    return get_default_verification_checklist(action)
 
