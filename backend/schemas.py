@@ -115,3 +115,20 @@ class ImpactAssessmentHistoryRecord(BaseModel):
     archived_at: str
     change_reason: Optional[str] = None
 
+
+# -------------------------------------------------------------
+# AMAZON BEDROCK ADVISORY SCHEMAS
+# -------------------------------------------------------------
+
+class BedrockAdvisoryRequest(BaseModel):
+    city_name: str = Field("Ahmedabad", description="Target municipality name")
+    max_hazard_level: Optional[str] = Field("HIGH", description="Peak thermal hazard classification")
+    peak_wbgt: Optional[float] = Field(31.5, description="Peak Wet-Bulb Globe Temperature in Celsius")
+    ward_summaries: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Top high-risk wards")
+    allocated_interventions: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Allocated intervention assets")
+    budget_used: Optional[float] = Field(450000.0, description="Total budget consumed in INR")
+    equity_score: Optional[float] = Field(0.88, description="Equity score (0.0 to 1.0)")
+    target_audience: Optional[str] = Field("MUNICIPAL_OFFICERS", description="Audience: MUNICIPAL_OFFICERS, FIELD_CREWS, or CITIZENS")
+    language: Optional[str] = Field("en", description="Output language code: en, gu, or hi")
+    model_id: Optional[str] = Field(None, description="Optional Bedrock Model ID override")
+

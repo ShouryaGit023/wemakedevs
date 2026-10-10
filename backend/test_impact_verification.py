@@ -13,6 +13,7 @@ Tests:
 10. Error handling, input validation, and 404 responses.
 """
 
+# pyrefly: ignore [missing-import]
 import pytest
 from datetime import datetime, timezone
 from fastapi.testclient import TestClient
@@ -402,11 +403,12 @@ class TestImpactVerificationEngine:
         assert r_bad_verif.status_code == 404
 
 
-"""
-ClimateShield - Unit Tests for Impact Verification Module
-Validates empirical change calculation, indicator compatibility, directional improvement,
-data provenance classification, zero-division resilience, and synthetic demonstration datasets.
-"""
+# ===========================================================================
+# ClimateShield - Unit Tests for Core Impact Verification Module
+# Validates empirical change calculation, indicator compatibility, directional improvement,
+# data provenance classification, zero-division resilience, and synthetic demonstration datasets.
+# ===========================================================================
+
 
 import unittest
 from datetime import datetime, timezone
@@ -1294,3 +1296,4 @@ class TestImpactReportingSummary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

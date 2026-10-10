@@ -268,20 +268,6 @@ def init_db() -> None:
     );
     """)
 
-    # Indices for relational query performance
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_predictions_ward ON predictions (ward_id, timestamp);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_pred ON recommendations (prediction_id);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_rec ON executed_actions (recommendation_id);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_pred ON executed_actions (prediction_id);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_pred ON verified_outcomes (prediction_id);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_action ON verified_outcomes (action_id);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_ward_date ON verified_outcomes (ward_id, measurement_date);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_verifications_action ON impact_verifications (action_id);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_verifications_ward ON impact_verifications (ward_id);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_evaluations_time ON model_evaluations (timestamp);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposed_parameter_updates (status);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_versions_active ON model_versions (is_active);")
-
     # 13. Verified Impact Assessments
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS impact_assessments (
@@ -318,6 +304,24 @@ def init_db() -> None:
         FOREIGN KEY (assessment_id) REFERENCES impact_assessments (assessment_id)
     );
     """)
+
+    # Indices for relational query performance
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_predictions_ward ON predictions (ward_id, timestamp);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_pred ON recommendations (prediction_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_rec ON executed_actions (recommendation_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_pred ON executed_actions (prediction_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_pred ON verified_outcomes (prediction_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_action ON verified_outcomes (action_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_ward_date ON verified_outcomes (ward_id, measurement_date);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_verifications_action ON impact_verifications (action_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_verifications_ward ON impact_verifications (ward_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_evaluations_time ON model_evaluations (timestamp);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposed_parameter_updates (status);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_versions_active ON model_versions (is_active);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_impact_assessments_ward ON impact_assessments (ward_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_impact_assessments_interv ON impact_assessments (intervention_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_impact_history_assessment ON impact_assessment_history (assessment_id);")
+
     conn.commit()
     conn.close()
 

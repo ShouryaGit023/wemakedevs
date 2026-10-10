@@ -11,36 +11,6 @@
   }
 }
 
-:root {
-  --bg-primary: #0a0e17;
-  --bg-secondary: #111827;
-  --bg-card: rgba(17, 24, 39, 0.75);
-  --bg-card-hover: rgba(30, 41, 59, 0.85);
-  --bg-input: rgba(15, 23, 42, 0.9);
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-active: rgba(56, 189, 248, 0.4);
-  
-  --text-main: #f8fafc;
-  --text-muted: #94a3b8;
-  --text-dim: #64748b;
-
-  --accent-cyan: #06b6d4;
-  --accent-blue: #3b82f6;
-  --accent-emerald: #10b981;
-  --accent-amber: #f59e0b;
-  --accent-rose: #f43f5e;
-  --accent-purple: #8b5cf6;
-
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-display: 'Outfit', sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
-
-  --shadow-card: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
-  --shadow-glow-cyan: 0 0 20px -3px rgba(6, 182, 212, 0.25);
-  --shadow-glow-emerald: 0 0 20px -3px rgba(16, 185, 129, 0.25);
-  --shadow-glow-amber: 0 0 20px -3px rgba(245, 158, 11, 0.25);
-}
-
 .material-symbols-outlined {
   font-family: 'Material Symbols Outlined';
   font-weight: normal;
@@ -82,6 +52,45 @@
   font-feature-settings: "tnum" 1, "zero" 1;
 }
 
+/* Learning Loop & Governance Dashboard Theme Tokens */
+:root {
+  --bg-primary: #0a0e17;
+  --bg-secondary: #111827;
+  --bg-card: rgba(17, 24, 39, 0.75);
+  --bg-card-hover: rgba(30, 41, 59, 0.85);
+  --bg-input: rgba(15, 23, 42, 0.9);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-active: rgba(56, 189, 248, 0.4);
+  
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --text-dim: #64748b;
+
+  --accent-cyan: #06b6d4;
+  --accent-blue: #3b82f6;
+  --accent-emerald: #10b981;
+  --accent-amber: #f59e0b;
+  --accent-rose: #f43f5e;
+  --accent-purple: #8b5cf6;
+
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-display: 'Outfit', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --shadow-card: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+  --shadow-glow-cyan: 0 0 20px -3px rgba(6, 182, 212, 0.25);
+  --shadow-glow-emerald: 0 0 20px -3px rgba(16, 185, 129, 0.25);
+  --shadow-glow-amber: 0 0 20px -3px rgba(245, 158, 11, 0.25);
+}
+
+/* Typography Helpers */
+.font-mono {
+  font-family: var(--font-mono);
+}
+.font-display {
+  font-family: var(--font-display);
+}
+
 /* Learning Loop & Dark Mode Scoped Themes */
 .learning-loop-container {
   background-color: var(--bg-primary);
@@ -94,17 +103,35 @@
     radial-gradient(at 50% 100%, rgba(139, 92, 246, 0.08) 0px, transparent 60%);
 }
 
-/* Typography Helpers for Learning Loop */
 .learning-loop-container h1,
 .learning-loop-container h2,
 .learning-loop-container h3,
 .learning-loop-container h4 {
   font-family: var(--font-display);
-  font-weight: 600;
-  letter-spacing: -0.02em;
 }
 
-/* Card & Glassmorphism */
+/* Common Card Containers */
+.card {
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: var(--shadow-card);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.card-interactive:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 15px 30px -8px rgba(0, 0, 0, 0.6);
+  border-color: var(--border-active);
+}
+
+/* Glassmorphism Legacy Panel */
 .glass-panel {
   background: var(--bg-card);
   backdrop-filter: blur(16px);
@@ -119,42 +146,47 @@
   border-color: rgba(255, 255, 255, 0.14);
 }
 
-/* Badges */
+/* Badges & Pills */
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 9999px;
   font-size: 0.72rem;
   font-weight: 600;
+  letter-spacing: 0.03em;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 3px 9px;
-  border-radius: 9999px;
-  border: 1px solid transparent;
 }
 
-.badge-real {
+.badge-measured {
   background: rgba(16, 185, 129, 0.15);
   color: #34d399;
-  border-color: rgba(16, 185, 129, 0.35);
+  border: 1px solid rgba(16, 185, 129, 0.35);
 }
 
-.badge-simulated {
-  background: rgba(139, 92, 246, 0.15);
-  color: #a78bfa;
-  border-color: rgba(139, 92, 246, 0.35);
+.badge-external {
+  background: rgba(6, 182, 212, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(6, 182, 212, 0.35);
 }
 
 .badge-estimated {
   background: rgba(245, 158, 11, 0.15);
   color: #fbbf24;
-  border-color: rgba(245, 158, 11, 0.35);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.badge-synthetic {
+  background: rgba(244, 63, 94, 0.15);
+  color: #fb7185;
+  border: 1px solid rgba(244, 63, 94, 0.35);
 }
 
 .badge-unverified {
-  background: rgba(244, 63, 94, 0.15);
-  color: #fb7185;
-  border-color: rgba(244, 63, 94, 0.35);
+  background: rgba(100, 116, 139, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(100, 116, 139, 0.3);
 }
 
 /* Buttons */
@@ -166,20 +198,40 @@
   padding: 8px 16px;
   border-radius: 8px;
   font-size: 0.85rem;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   border: 1px solid transparent;
+  transition: all 0.2s ease;
+  user-select: none;
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, #0284c7, #0284c7);
-  color: white;
-  box-shadow: 0 0 15px rgba(2, 132, 199, 0.3);
+  background: linear-gradient(135deg, #0284c7, #0369a1);
+  color: #ffffff;
+  box-shadow: 0 2px 10px rgba(2, 132, 199, 0.3);
+}
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #0369a1, #075985);
+  transform: translateY(-1px);
 }
 
-.btn-primary:hover {
-  background: linear-gradient(135deg, #0369a1, #0284c7);
+.btn-success {
+  background: linear-gradient(135deg, #059669, #047857);
+  color: #ffffff;
+  box-shadow: 0 2px 10px rgba(5, 150, 105, 0.3);
+}
+.btn-success:hover:not(:disabled) {
+  background: linear-gradient(135deg, #047857, #065f46);
+  transform: translateY(-1px);
+}
+
+.btn-danger {
+  background: linear-gradient(135deg, #e11d48, #be123c);
+  color: #ffffff;
+  box-shadow: 0 2px 10px rgba(225, 29, 72, 0.3);
+}
+.btn-danger:hover:not(:disabled) {
+  background: linear-gradient(135deg, #be123c, #9f1239);
   transform: translateY(-1px);
 }
 
@@ -205,16 +257,6 @@
   transform: translateY(-1px);
 }
 
-.btn-danger {
-  background: rgba(244, 63, 94, 0.15);
-  color: #fb7185;
-  border-color: rgba(244, 63, 94, 0.3);
-}
-
-.btn-danger:hover {
-  background: rgba(244, 63, 94, 0.25);
-}
-
 /* Form Elements */
 .input-text, .select-input {
   background: var(--bg-input);
@@ -229,7 +271,73 @@
 
 .input-text:focus, .select-input:focus {
   border-color: var(--accent-cyan);
-  box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.2);
+  box-shadow: 0 0 0 1px var(--accent-cyan);
+}
+
+/* Data Table Styles */
+.data-table-container {
+  overflow-x: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.data-table th {
+  background: rgba(15, 23, 42, 0.95);
+  color: var(--text-muted);
+  font-weight: 600;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.data-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  color: var(--text-main);
+}
+
+.data-table tr:hover td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* Metric Display KPI Cards */
+.kpi-metric-box {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.kpi-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.kpi-value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--text-main);
+  letter-spacing: -0.02em;
+}
+
+.kpi-subtext {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 4px;
 }
 
 /* Pulse animation */
@@ -245,11 +353,11 @@
   animation: pulseGlow 2s infinite ease-in-out;
 }
 
-/* Modal Backdrop & Content */
-.modal-backdrop {
+/* Modal Overlay & Backdrop */
+.modal-overlay, .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.75);
   backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
