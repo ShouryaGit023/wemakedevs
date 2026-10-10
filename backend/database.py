@@ -15,16 +15,19 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "data", "climateshield_baselin
 
 
 def get_db_connection() -> sqlite3.Connection:
-    """Returns a connection to the SQLite baseline database with row dict factory."""
+    """Returns a connection to the SQLite baseline database with row dict factory, WAL mode, and foreign keys enabled."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
 def init_db() -> None:
     """Initializes tables in the baseline database."""
     conn = get_db_connection()
+    conn.execute("PRAGMA journal_mode = WAL;")
     cursor = conn.cursor()
 
     # 1. Wards Table
@@ -87,6 +90,200 @@ def init_db() -> None:
     );
     """)
 
+<<<<<<< HEAD
+    # 5. Learning Loop: Historical Risk Predictions
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS predictions (
+        prediction_id TEXT PRIMARY KEY,
+        ward_id TEXT NOT NULL,
+        ward_name TEXT,
+        timestamp TEXT NOT NULL,
+        hazard_type TEXT NOT NULL,
+        predicted_risk_score REAL NOT NULL,
+        risk_category TEXT NOT NULL,
+        data_source TEXT NOT NULL,
+        provenance TEXT NOT NULL DEFAULT 'ESTIMATED',
+        details_json TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (ward_id) REFERENCES wards (id)
+    );
+    """)
+
+    # 6. Learning Loop: Recommended Interventions
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS recommendations (
+        recommendation_id TEXT PRIMARY KEY,
+        prediction_id TEXT NOT NULL,
+        ward_id TEXT NOT NULL,
+        intervention_type TEXT NOT NULL,
+        priority_score REAL,
+        estimated_cost_inr REAL,
+        expected_impact_min REAL,
+        expected_impact_expected REAL,
+        expected_impact_max REAL,
+        required_crew INTEGER,
+        required_water_l REAL,
+        assumptions_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PROPOSED',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (prediction_id) REFERENCES predictions (prediction_id),
+        FOREIGN KEY (ward_id) REFERENCES wards (id)
+    );
+    """)
+
+    # 7. Learning Loop: Executed Field Actions (Approved and carried out actions)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS executed_actions (
+        action_id TEXT PRIMARY KEY,
+        recommendation_id TEXT,
+        prediction_id TEXT,
+        ward_id TEXT NOT NULL,
+        intervention_type TEXT NOT NULL,
+        approval_status TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        approved_at TEXT,
+        execution_status TEXT NOT NULL DEFAULT 'SCHEDULED',
+        started_at TEXT,
+        completed_at TEXT,
+        actual_cost_inr REAL,
+        actual_crew_used INTEGER,
+        actual_water_used_l REAL,
+        failure_reason TEXT,
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (recommendation_id) REFERENCES recommendations (recommendation_id),
+        FOREIGN KEY (prediction_id) REFERENCES predictions (prediction_id),
+        FOREIGN KEY (ward_id) REFERENCES wards (id)
+    );
+    """)
+
+    # 8. Learning Loop: Verified Municipal Outcomes
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS verified_outcomes (
+        outcome_id TEXT PRIMARY KEY,
+        ward_id TEXT NOT NULL,
+        prediction_id TEXT,
+        action_id TEXT,
+        measurement_date TEXT NOT NULL,
+        measurement_window_hours INTEGER DEFAULT 24,
+        hazard_type TEXT NOT NULL,
+        hospital_heat_admissions INTEGER DEFAULT 0,
+        mortality_count INTEGER DEFAULT 0,
+        emergency_108_calls INTEGER DEFAULT 0,
+        water_scarcity_complaints INTEGER DEFAULT 0,
+        waterlogging_depth_cm REAL,
+        data_source TEXT NOT NULL,
+        provenance TEXT NOT NULL DEFAULT 'REAL',
+        data_quality_score REAL DEFAULT 1.0,
+        verification_notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (prediction_id) REFERENCES predictions (prediction_id),
+        FOREIGN KEY (action_id) REFERENCES executed_actions (action_id),
+        FOREIGN KEY (ward_id) REFERENCES wards (id)
+    );
+    """)
+
+    # 9. Learning Loop: Impact Verifications (Before-After & Difference-in-Differences)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS impact_verifications (
+        verification_id TEXT PRIMARY KEY,
+        action_id TEXT NOT NULL,
+        ward_id TEXT NOT NULL,
+        control_ward_id TEXT,
+        hazard_type TEXT NOT NULL,
+        primary_metric TEXT NOT NULL,
+        methodology TEXT NOT NULL,
+        status TEXT NOT NULL,
+        baseline_period TEXT,
+        followup_period TEXT,
+        baseline_value REAL,
+        followup_value REAL,
+        control_baseline_value REAL,
+        control_followup_value REAL,
+        observed_delta REAL,
+        did_estimate REAL,
+        expected_impact_nominal REAL,
+        action_completed INTEGER NOT NULL,
+        intended_outcome_observed INTEGER,
+        provenance TEXT NOT NULL,
+        confidence_score REAL NOT NULL,
+        causal_claim_allowed INTEGER NOT NULL DEFAULT 0,
+        uncertainty_json TEXT,
+        explanation TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (action_id) REFERENCES executed_actions (action_id),
+        FOREIGN KEY (ward_id) REFERENCES wards (id)
+    );
+    """)
+
+    # 10. Learning Loop: Model Evaluations & Accuracy Tracking
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS model_evaluations (
+        evaluation_id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        eval_window_days INTEGER DEFAULT 30,
+        heat_metrics_json TEXT NOT NULL,
+        waterlogging_metrics_json TEXT NOT NULL,
+        water_shortage_metrics_json TEXT NOT NULL,
+        overall_mae REAL,
+        sample_count_real INTEGER NOT NULL,
+        sample_count_excluded INTEGER NOT NULL,
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    # 11. Learning Loop: Proposed Parameter Updates (Require Human Approval)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS proposed_parameter_updates (
+        proposal_id TEXT PRIMARY KEY,
+        evaluation_id TEXT NOT NULL,
+        target_parameter_type TEXT NOT NULL,
+        target_identifier TEXT NOT NULL,
+        current_value REAL NOT NULL,
+        proposed_value REAL NOT NULL,
+        delta REAL NOT NULL,
+        supporting_samples_count INTEGER NOT NULL,
+        justification TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING_APPROVAL',
+        reviewed_by TEXT,
+        reviewed_at TEXT,
+        review_notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (evaluation_id) REFERENCES model_evaluations (evaluation_id)
+    );
+    """)
+
+    # 12. Learning Loop: Immutable Model Versions & Parameter Audit Trail
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS model_versions (
+        version_id TEXT PRIMARY KEY,
+        version_number INTEGER NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 0,
+        parameters_json TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        approved_at TEXT NOT NULL,
+        change_summary TEXT NOT NULL,
+        proposal_id TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    # Indices for relational query performance
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_predictions_ward ON predictions (ward_id, timestamp);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_pred ON recommendations (prediction_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_rec ON executed_actions (recommendation_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_pred ON executed_actions (prediction_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_pred ON verified_outcomes (prediction_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_action ON verified_outcomes (action_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_ward_date ON verified_outcomes (ward_id, measurement_date);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_verifications_action ON impact_verifications (action_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_verifications_ward ON impact_verifications (ward_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_evaluations_time ON model_evaluations (timestamp);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposed_parameter_updates (status);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_versions_active ON model_versions (is_active);")
+
+=======
     # 5. Verified Impact Assessments
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS impact_assessments (
@@ -124,6 +321,7 @@ def init_db() -> None:
     );
     """)
 
+>>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e
     conn.commit()
     conn.close()
 
@@ -133,10 +331,11 @@ def seed_baseline_data() -> None:
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Check if wards already seeded
+    # Seed all 48 Wards from GeoJSON if available, with core 10 having calibrated vulnerability
     cursor.execute("SELECT COUNT(*) as count FROM wards;")
-    if cursor.fetchone()["count"] == 0:
-        # Seed Ahmedabad 10 Priority Pilot Wards
+    count = cursor.fetchone()["count"]
+    if count < 48:
+        # Seed core priority wards
         ahmedabad_wards = [
             ("W1", "Danilimda", 0.85, 0.75, 0.20, 0.92, 125000, 6.2),
             ("W2", "Behrampura", 0.80, 0.70, 0.18, 0.88, 110000, 5.4),
@@ -150,9 +349,27 @@ def seed_baseline_data() -> None:
             ("W10", "Naroda", 0.60, 0.58, 0.21, 0.70, 100000, 6.8)
         ]
         cursor.executemany("""
-        INSERT INTO wards (id, name, slum_density, outdoor_labor_ratio, elderly_ratio, baseline_heat_risk, population, area_sq_km)
+        INSERT OR IGNORE INTO wards (id, name, slum_density, outdoor_labor_ratio, elderly_ratio, baseline_heat_risk, population, area_sq_km)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?);
         """, ahmedabad_wards)
+
+        # Seed remaining wards up to W48 from GeoJSON if present
+        geojson_path = os.path.join(os.path.dirname(__file__), "data", "Ahmedabad_Wards.geojson")
+        if os.path.exists(geojson_path):
+            try:
+                with open(geojson_path, "r", encoding="utf-8") as f:
+                    geo = json.load(f)
+                features = geo.get("features", [])
+                for idx, feat in enumerate(features):
+                    w_id = f"W{idx + 1}"
+                    props = feat.get("properties", {})
+                    name = props.get("Name", props.get("NAME", f"Ward {idx + 1}"))
+                    cursor.execute("""
+                    INSERT OR IGNORE INTO wards (id, name, slum_density, outdoor_labor_ratio, elderly_ratio, baseline_heat_risk, population, area_sq_km)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                    """, (w_id, name, 0.50, 0.50, 0.20, 0.60, 100000, 5.0))
+            except Exception:
+                pass
 
     # Check if interventions catalog already seeded
     cursor.execute("SELECT COUNT(*) as count FROM interventions;")
@@ -183,6 +400,30 @@ def seed_baseline_data() -> None:
         INSERT INTO outcome_records (record_date, ward_id, hospital_heat_admissions, mortality_count, emergency_108_calls, water_scarcity_complaints, reported_by)
         VALUES (?, ?, ?, ?, ?, ?, ?);
         """, sample_outcomes)
+
+    # Check if initial baseline model version v1.0.0 is seeded
+    cursor.execute("SELECT COUNT(*) as count FROM model_versions;")
+    if cursor.fetchone()["count"] == 0:
+        default_params = {
+            "ward_vulnerability_offsets": {},
+            "intervention_efficacy_multipliers": {
+                "cooling_center": 1.0,
+                "hydration_kiosk": 1.0,
+                "shade_canopy": 1.0,
+                "cool_roof_coating": 1.0,
+                "heat_alert_outreach": 1.0,
+                "drainage_inspection_clean": 1.0,
+                "flood_barricade_warning": 1.0,
+                "mobile_pumping": 1.0,
+                "water_tanker_dispatch": 1.0,
+                "piped_supply_priority": 1.0
+            },
+            "hazard_weights": {"heat": 0.50, "water": 0.50}
+        }
+        cursor.execute("""
+        INSERT INTO model_versions (version_id, version_number, is_active, parameters_json, approved_by, approved_at, change_summary)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """, ("v1.0.0", 1, 1, json.dumps(default_params), "SYSTEM_INITIALIZATION", datetime.now(timezone.utc).isoformat(), "Initial baseline model version with uncalibrated prior parameters."))
 
     conn.commit()
     conn.close()

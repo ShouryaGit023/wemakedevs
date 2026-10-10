@@ -18,10 +18,14 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
+<<<<<<< HEAD
+    "oxlint": "^1.81.0",
+=======
     "autoprefixer": "^10.6.1",
     "oxlint": "^1.81.0",
     "postcss": "^8.5.29",
     "tailwindcss": "^3.4.19",
+>>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e
     "vite": "^8.3.0"
   }
 }
