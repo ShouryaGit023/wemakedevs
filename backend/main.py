@@ -2090,3 +2090,100 @@ async def get_learning_loop_signals_endpoint(
         "signals": signals
     }
 
+
+# ---------------------------------------------------------------------------
+# AMAZON BEDROCK GENAI ADVISORY ENDPOINTS
+# ---------------------------------------------------------------------------
+from backend.bedrock_service import (
+    generate_heat_advisory_with_bedrock,
+    generate_fallback_advisory,
+    DEFAULT_BEDROCK_MODEL,
+    AWS_REGION
+)
+from backend.schemas import BedrockAdvisoryRequest
+
+
+@app.post("/api/bedrock/advisory")
+async def generate_bedrock_advisory_endpoint(req: BedrockAdvisoryRequest):
+    """
+    Invokes Amazon Bedrock to synthesize physics-based WBGT heat risk and
+    OR-Tools resource allocations into actionable civic action advisories.
+    Supports English ('en'), Gujarati ('gu'), and Hindi ('hi').
+    """
+    result = generate_heat_advisory_with_bedrock(
+        city_name=req.city_name,
+        max_hazard_level=req.max_hazard_level or "HIGH",
+        peak_wbgt=req.peak_wbgt or 31.5,
+        ward_summaries=req.ward_summaries or [],
+        allocated_interventions=req.allocated_interventions or [],
+        budget_used=req.budget_used or 450000.0,
+        equity_score=req.equity_score or 0.88,
+        target_audience=req.target_audience or "MUNICIPAL_OFFICERS",
+        language=req.language or "en",
+        model_id=req.model_id
+    )
+    return result
+
+
+@app.get("/api/bedrock/status")
+async def get_bedrock_status_endpoint():
+    """
+    Returns the operational status, target model family, and AWS configuration for Amazon Bedrock.
+    """
+    from backend.bedrock_service import get_bedrock_client, BOTO3_AVAILABLE
+    client = get_bedrock_client()
+    return {
+        "service": "Amazon Bedrock",
+        "boto3_installed": BOTO3_AVAILABLE,
+        "client_active": client is not None,
+        "default_model": DEFAULT_BEDROCK_MODEL,
+        "aws_region": AWS_REGION,
+        "supported_languages": ["en", "gu", "hi"],
+        "supported_models": [
+            "anthropic.claude-3-haiku-20240307-v1:0",
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
+            "amazon.titan-text-express-v1"
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
+# AMAZON AURORA DATASET ENDPOINTS
+# ---------------------------------------------------------------------------
+from backend.aurora_service import aurora_manager
+
+
+@app.get("/api/aurora/status")
+async def get_aurora_status_endpoint():
+    """
+    Returns the operational status, adapter mode, and connection details for Amazon Aurora.
+    """
+    return aurora_manager.get_connection_status()
+
+
+@app.get("/api/aurora/schema")
+async def get_aurora_schema_endpoint():
+    """
+    Returns the Amazon Aurora PostgreSQL / Serverless DDL table definitions and indexes.
+    """
+    return {
+        "engine": "Amazon Aurora PostgreSQL / Serverless v2",
+        "ddl": aurora_manager.get_aurora_ddl_schema()
+    }
+
+
+@app.get("/api/aurora/dataset")
+async def export_aurora_dataset_endpoint():
+    """
+    Exports the verified municipal baseline dataset package for Amazon Aurora loading.
+    """
+    return aurora_manager.export_dataset_payload()
+
+
+@app.post("/api/aurora/sync")
+async def sync_aurora_dataset_endpoint():
+    """
+    Synchronizes local baseline datasets and audit records with Amazon Aurora.
+    """
+    return aurora_manager.sync_dataset_to_aurora()
+
