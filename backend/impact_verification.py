@@ -1,5 +1,4 @@
 """
-<<<<<<< HEAD
 ClimateShield - Impact Verification Module
 Evaluates the empirical efficacy of executed interventions by comparing
 predicted risks and expected benefits with observed outcomes.
@@ -506,45 +505,21 @@ def list_verifications(
         d["causal_claim_allowed"] = bool(d["causal_claim_allowed"])
         results.append(d)
     return results
-=======
-ClimateShield - Core Impact Verification Engine
-Evaluates and reports observed physical and operational changes associated with
-climate interventions by comparing baseline conditions with follow-up observations.
 
-Scientific Principles & Governance Safeguards:
-=============================================
-1. Non-Fabrication of Physical Metrics:
-   Physical changes (e.g. temperature reductions, flood depth drop, water supplied)
-   are NEVER derived or synthesized from abstract risk scores alone. They require
-   real empirical observations or explicitly labeled synthetic demonstration inputs.
 
-2. Empirical Observation Provenance:
-   Every observation carries an unambiguous source classification:
-     - MEASURED: Direct in-situ sensor / IoT hardware telemetry.
-     - EXTERNAL_OBSERVATION: Municipal surveillance records, IMD alerts, hospital records.
-     - ESTIMATED: Modeled physical proxies or satellite-derived estimates.
-     - SYNTHETIC_DEMO: Synthetic demonstration data explicitly generated for
-       dry-run testing when field telemetry is unavailable.
+# ===========================================================================
+# ClimateShield - Core Impact Verification Engine
+# Evaluates and reports observed physical and operational changes associated with
+# climate interventions by comparing baseline conditions with follow-up observations.
+#
+# Scientific Principles & Governance Safeguards:
+# 1. Non-Fabrication of Physical Metrics
+# 2. Empirical Observation Provenance (MEASURED, EXTERNAL_OBSERVATION, ESTIMATED, SYNTHETIC_DEMO)
+# 3. Attribution Caution (Correlation != Causation)
+# 4. Strict Compatibility & Aggregation Rules
+# 5. Mathematical Integrity
+# ===========================================================================
 
-3. Attribution Caution (Correlation != Causation):
-   Observational differences between baseline and follow-up windows do not prove
-   counterfactual causation. Observed shifts may be influenced by synoptic weather
-   transitions, diurnal solar fluctuations, rainfall cessation, or unmodeled
-   concurrent municipal operations.
-
-4. Strict Compatibility & Aggregation Rules:
-   Observations are aggregated only when their indicators, measurement units,
-   spatial locations, and temporal periods are compatible. Mismatched units
-   or locations return explicit incompatibility statuses without silent coercion.
-
-5. Mathematical Integrity:
-   - Percentage change is calculated only when the baseline is non-zero.
-     A baseline of 0.0 results in an undefined percentage change with an explicit warning.
-   - Interval-scale measurements (such as degrees Celsius) are noted so that
-     absolute physical differences are prioritized over percentage calculations.
-   - Bidirectional indicators: Both decrease-beneficial (e.g., WBGT, flood depth)
-     and increase-beneficial (e.g., water delivered, supply duration) are supported.
-"""
 
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -2458,6 +2433,3 @@ def export_learning_loop_signals(
 
     return signals
 
-
-
->>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e

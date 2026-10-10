@@ -1,5 +1,4 @@
 """
-<<<<<<< HEAD
 ClimateShield - Automated Test Suite for Impact Verification Engine
 Tests:
 1. Simple before-and-after comparison with strict non-causal labeling.
@@ -401,11 +400,14 @@ class TestImpactVerificationEngine:
 
         r_bad_verif = client.get("/api/impact/verifications/non_existent_verif_999")
         assert r_bad_verif.status_code == 404
-=======
-ClimateShield - Unit Tests for Impact Verification Module
-Validates empirical change calculation, indicator compatibility, directional improvement,
-data provenance classification, zero-division resilience, and synthetic demonstration datasets.
-"""
+
+
+# ===========================================================================
+# ClimateShield - Unit Tests for Core Impact Verification Module
+# Validates empirical change calculation, indicator compatibility, directional improvement,
+# data provenance classification, zero-division resilience, and synthetic demonstration datasets.
+# ===========================================================================
+
 
 import unittest
 from datetime import datetime, timezone
@@ -1294,5 +1296,3 @@ class TestImpactReportingSummary(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-
->>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e
