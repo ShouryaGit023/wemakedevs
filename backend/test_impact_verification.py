@@ -13,6 +13,7 @@ Tests:
 10. Error handling, input validation, and 404 responses.
 """
 
+# pyrefly: ignore [missing-import]
 import pytest
 from datetime import datetime, timezone
 from fastapi.testclient import TestClient
