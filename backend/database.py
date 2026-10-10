@@ -90,7 +90,6 @@ def init_db() -> None:
     );
     """)
 
-<<<<<<< HEAD
     # 5. Learning Loop: Historical Risk Predictions
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS predictions (
@@ -283,8 +282,7 @@ def init_db() -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposed_parameter_updates (status);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_versions_active ON model_versions (is_active);")
 
-=======
-    # 5. Verified Impact Assessments
+    # 13. Verified Impact Assessments
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS impact_assessments (
         assessment_id TEXT PRIMARY KEY,
@@ -308,7 +306,7 @@ def init_db() -> None:
     );
     """)
 
-    # 6. Impact Assessment Audit History
+    # 14. Impact Assessment Audit History
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS impact_assessment_history (
         history_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -320,8 +318,6 @@ def init_db() -> None:
         FOREIGN KEY (assessment_id) REFERENCES impact_assessments (assessment_id)
     );
     """)
-
->>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e
     conn.commit()
     conn.close()
 

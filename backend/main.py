@@ -4,6 +4,7 @@ Exposes Heat Action APIs, Open-Meteo WBGT forecasting, and Optimization endpoint
 """
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -49,7 +50,6 @@ from backend.data_sources import (
     DataFusionEngine,
     DataSourcesService
 )
-<<<<<<< HEAD
 from backend.learning_loop import (
     PredictionRecordCreate,
     BatchRecommendationCreate,
@@ -74,7 +74,19 @@ from backend.impact_verification import (
     ImpactVerificationRequest,
     verify_intervention_impact,
     get_verification,
-    list_verifications
+    list_verifications,
+    assess_intervention_impact,
+    record_impact_assessment,
+    retrieve_impact_assessment,
+    list_impact_assessments,
+    retrieve_assessment_history,
+    update_impact_assessment,
+    generate_impact_verification_summary,
+    export_learning_loop_signals,
+    ExecutionStatus,
+    SourceType,
+    QualityStatus,
+    ATTRIBUTION_DISCLAIMER
 )
 from backend.learning_engine import (
     ModelEvaluationRequest,
@@ -91,7 +103,6 @@ from backend.learning_engine import (
     list_model_versions,
     rollback_model_version
 )
-=======
 from backend.action_centre import (
     get_action_store,
     generate_actions_from_climate_risk,
@@ -108,22 +119,7 @@ from backend.action_centre import (
     VALID_STATUSES,
     HUMAN_APPROVAL_NOTICE as ACTION_CENTRE_ADVISORY,
 )
-from backend.impact_verification import (
-    assess_intervention_impact,
-    record_impact_assessment,
-    retrieve_impact_assessment,
-    list_impact_assessments,
-    retrieve_assessment_history,
-    update_impact_assessment,
-    generate_impact_verification_summary,
-    export_learning_loop_signals,
-    ExecutionStatus,
-    SourceType,
-    QualityStatus,
-    ATTRIBUTION_DISCLAIMER
-)
 from backend.database import DuplicateAssessmentError
->>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e
 
 app = FastAPI(
     title="ClimateShield API - Ahmedabad Heat Decision Support",
@@ -144,6 +140,11 @@ app.add_middleware(
 FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
 if os.path.exists(FRONTEND_DIST):
     app.mount("/dashboard", StaticFiles(directory=FRONTEND_DIST, html=True), name="dashboard")
+else:
+    @app.get("/dashboard", response_class=HTMLResponse)
+    @app.get("/dashboard/", response_class=HTMLResponse)
+    async def dashboard_fallback():
+        return HTMLResponse("<!doctype html><html><head><title>ClimateShield Dashboard</title></head><body><h1>ClimateShield Dashboard</h1><p>Frontend active at <a href='http://localhost:5173'>http://localhost:5173</a></p></body></html>")
 
 
 class OptimizationRequest(BaseModel):
@@ -184,7 +185,6 @@ def read_root():
             "/api/data-sources/era5",
             "/api/data-sources/ecostress",
             "/api/data-sources/fusion",
-<<<<<<< HEAD
             "/api/learning/predictions",
             "/api/learning/recommendations",
             "/api/learning/actions",
@@ -194,8 +194,7 @@ def read_root():
             "/api/impact/verifications",
             "/api/learning/evaluate",
             "/api/learning/active-parameters",
-            "/api/learning/versions"
-=======
+            "/api/learning/versions",
             "/api/action-centre/dashboard",
             "/api/action-centre/actions",
             "/api/action-centre/actions/{action_id}",
@@ -206,8 +205,7 @@ def read_root():
             "/api/impact/assessments/{assessment_id}",
             "/api/impact/wards/{ward_id}",
             "/api/impact/summary",
-            "/api/impact/learning-signals",
->>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e
+            "/api/impact/learning-signals"
         ]
     }
 
@@ -1140,7 +1138,6 @@ async def optimize_from_fused_data(req: FusedOptimizationRequest):
 
 
 # -------------------------------------------------------------
-<<<<<<< HEAD
 # LEARNING LOOP: DATA RECORDING & LINEAGE ENDPOINTS
 # -------------------------------------------------------------
 
@@ -1526,7 +1523,7 @@ async def rollback_version_endpoint(version_id: str, req: ProposalApprovalReques
 
 
 
-=======
+# -------------------------------------------------------------
 # ACTION CENTRE ENDPOINTS
 # -------------------------------------------------------------
 
@@ -2099,4 +2096,3 @@ async def get_learning_loop_signals_endpoint(
         "data_integrity_mode": "INCLUDES_SIMULATED_DEMO" if include_synthetic else "REAL_WORLD_VERIFIED_ONLY",
         "signals": signals
     }
->>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e

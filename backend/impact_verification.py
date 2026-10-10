@@ -1,5 +1,4 @@
 """
-<<<<<<< HEAD
 ClimateShield - Impact Verification Module
 Evaluates the empirical efficacy of executed interventions by comparing
 predicted risks and expected benefits with observed outcomes.
@@ -506,7 +505,9 @@ def list_verifications(
         d["causal_claim_allowed"] = bool(d["causal_claim_allowed"])
         results.append(d)
     return results
-=======
+
+
+"""
 ClimateShield - Core Impact Verification Engine
 Evaluates and reports observed physical and operational changes associated with
 climate interventions by comparing baseline conditions with follow-up observations.
@@ -2457,7 +2458,3 @@ def export_learning_loop_signals(
             })
 
     return signals
-
-
-
->>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e

@@ -7,6 +7,7 @@ export default function Sidebar({ activeTab, onSelectTab, onOpenAdvisory, isMobi
     { id: 'planner', label: 'Intervention Planner', icon: 'crisis_alert' },
     { id: 'action-centre', label: 'Action Centre', icon: 'local_police' },
     { id: 'verification', label: 'Impact Verification', icon: 'verified' },
+    { id: 'learning-loop', label: 'Learning & Governance', icon: 'sync' },
     { id: 'system-status', label: 'Data & System Status', icon: 'database' }
   ];
 
