@@ -50,6 +50,8 @@ ACTION_TYPES = [
     "communal_bladder_tank",
     "water_conservation_advisory",
     "water_allocation_review",
+    "leak_inspection_repair",
+    "groundwater_extraction_monitoring",
     "other",
 ]
 

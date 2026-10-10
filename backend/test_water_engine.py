@@ -81,12 +81,47 @@ def test_water_shortage_calculations():
     print(f"  Per-capita deficit pts: {drought_res['contributing_factors']['per_capita_deficit_pts']}")
     print(f"  Reservoir depletion pts: {drought_res['contributing_factors']['reservoir_depletion_pts']}")
 
-    # Missing supply data behavior
+    # Missing supply and reservoir data behavior
     missing_res = calculate_water_shortage_risk(supply_lpcd=None, reservoir_storage_pct=None)
     assert missing_res["has_measured_supply_data"] is False
     assert "Estimated shortage baseline" in missing_res["explanation"]
+    assert missing_res["contributing_factors"]["groundwater_stress_pts"] == 3.0  # Unobserved proxy
     print(f"  Missing supply fallback score: {missing_res['score']} (flagged as unobserved)")
-    print("  ✅ Water shortage calculations PASSED")
+
+    # Test 3B: Groundwater Stress Integration
+    gw_shallow = {
+        "has_proximate_station": True,
+        "station_name": "Sanand Shallow Pz",
+        "water_level_mbgl": 5.0,
+        "annual_decline_rate_m_per_year": 0.0,
+        "seasonal_recharge_potential_m": 4.5,
+        "aquifer_stress_tier": "SHALLOW_WATER_TABLE"
+    }
+    gw_critical = {
+        "has_proximate_station": True,
+        "station_name": "Vatva Depleted Pz",
+        "water_level_mbgl": 34.0,
+        "annual_decline_rate_m_per_year": 2.5,
+        "seasonal_recharge_potential_m": 0.5,
+        "aquifer_stress_tier": "CRITICAL_AQUIFER_DEPLETION"
+    }
+
+    res_shallow = calculate_water_shortage_risk(supply_lpcd=120.0, reservoir_storage_pct=85.0, groundwater_context=gw_shallow)
+    res_critical = calculate_water_shortage_risk(supply_lpcd=120.0, reservoir_storage_pct=85.0, groundwater_context=gw_critical)
+
+    assert res_critical["score"] > res_shallow["score"], "Critical groundwater stress must strictly increase shortage score"
+    assert res_critical["contributing_factors"]["groundwater_stress_pts"] > res_shallow["contributing_factors"]["groundwater_stress_pts"]
+    print(f"  Groundwater shallow score: {res_shallow['score']} (GW pts: {res_shallow['contributing_factors']['groundwater_stress_pts']})")
+    print(f"  Groundwater critical score: {res_critical['score']} (GW pts: {res_critical['contributing_factors']['groundwater_stress_pts']})")
+
+    # Test 3C: Direction of change / secular trend
+    gw_rising_depth = {"water_level_mbgl": 20.0, "annual_decline_rate_m_per_year": 1.5, "has_proximate_station": True}
+    gw_falling_depth = {"water_level_mbgl": 20.0, "annual_decline_rate_m_per_year": -1.0, "has_proximate_station": True}
+    res_rising = calculate_water_shortage_risk(supply_lpcd=120.0, reservoir_storage_pct=85.0, groundwater_context=gw_rising_depth)
+    res_falling = calculate_water_shortage_risk(supply_lpcd=120.0, reservoir_storage_pct=85.0, groundwater_context=gw_falling_depth)
+    assert res_rising["score"] > res_falling["score"], "Deepening water table must yield higher risk than recovering table"
+
+    print("  ✅ Water shortage calculations PASSED (Groundwater integrated)")
 
 
 def test_data_quality_and_confidence():

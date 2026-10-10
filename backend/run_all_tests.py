@@ -17,6 +17,8 @@ import unittest
 from backend.tests.test_complete_workflow import TestCompleteBackendWorkflow
 from backend.tests.test_data_sources import TestDataSourcesAndFusion
 from backend.tests.test_data_sources_integration import TestDataSourcesIntegration
+from backend.test_groundwater import TestGroundwaterParser, TestGroundwaterDatabaseAndAPI
+from backend.test_reservoirs import TestReservoirParser, TestReservoirDatabaseAndAPI, TestWaterEngineReservoirIntegration
 
 def run_all():
     loader = unittest.TestLoader()
@@ -24,6 +26,11 @@ def run_all():
     suite.addTests(loader.loadTestsFromTestCase(TestCompleteBackendWorkflow))
     suite.addTests(loader.loadTestsFromTestCase(TestDataSourcesAndFusion))
     suite.addTests(loader.loadTestsFromTestCase(TestDataSourcesIntegration))
+    suite.addTests(loader.loadTestsFromTestCase(TestGroundwaterParser))
+    suite.addTests(loader.loadTestsFromTestCase(TestGroundwaterDatabaseAndAPI))
+    suite.addTests(loader.loadTestsFromTestCase(TestReservoirParser))
+    suite.addTests(loader.loadTestsFromTestCase(TestReservoirDatabaseAndAPI))
+    suite.addTests(loader.loadTestsFromTestCase(TestWaterEngineReservoirIntegration))
 
     runner = unittest.TextTestRunner(verbosity=2)
 
