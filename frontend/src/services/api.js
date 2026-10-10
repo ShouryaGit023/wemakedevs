@@ -111,8 +111,23 @@ export const ClimateShieldAPI = {
   async getWaterRiskWards(params = {}) {
     const query = new URLSearchParams();
     if (params.scenario_id) query.append('scenario_id', params.scenario_id);
+    if (params.supply_lpcd !== undefined) query.append('supply_lpcd', params.supply_lpcd);
+    if (params.reservoir_storage_pct !== undefined) query.append('reservoir_storage_pct', params.reservoir_storage_pct);
+    if (params.rainfall_24h_mm !== undefined) query.append('rainfall_24h_mm', params.rainfall_24h_mm);
+    if (params.peak_hourly_rainfall_mm !== undefined) query.append('peak_hourly_rainfall_mm', params.peak_hourly_rainfall_mm);
     const qs = query.toString() ? `?${query.toString()}` : '';
     return request(`/api/water/wards${qs}`);
+  },
+
+  async getCitywideWaterRisk(params = {}) {
+    const query = new URLSearchParams();
+    if (params.scenario_id) query.append('scenario_id', params.scenario_id);
+    if (params.supply_lpcd !== undefined) query.append('supply_lpcd', params.supply_lpcd);
+    if (params.reservoir_storage_pct !== undefined) query.append('reservoir_storage_pct', params.reservoir_storage_pct);
+    if (params.rainfall_24h_mm !== undefined) query.append('rainfall_24h_mm', params.rainfall_24h_mm);
+    if (params.peak_hourly_rainfall_mm !== undefined) query.append('peak_hourly_rainfall_mm', params.peak_hourly_rainfall_mm);
+    const qs = query.toString() ? `?${query.toString()}` : '';
+    return request(`/api/water/risk${qs}`);
   },
 
   async getWaterScenarios() {
@@ -122,8 +137,64 @@ export const ClimateShieldAPI = {
   async getSingleWardWaterRisk(wardId, params = {}) {
     const query = new URLSearchParams();
     if (params.scenario_id) query.append('scenario_id', params.scenario_id);
+    if (params.supply_lpcd !== undefined) query.append('supply_lpcd', params.supply_lpcd);
+    if (params.reservoir_storage_pct !== undefined) query.append('reservoir_storage_pct', params.reservoir_storage_pct);
+    if (params.rainfall_24h_mm !== undefined) query.append('rainfall_24h_mm', params.rainfall_24h_mm);
+    if (params.peak_hourly_rainfall_mm !== undefined) query.append('peak_hourly_rainfall_mm', params.peak_hourly_rainfall_mm);
     const qs = query.toString() ? `?${query.toString()}` : '';
     return request(`/api/water/wards/${encodeURIComponent(wardId)}${qs}`);
+  },
+
+  async calculateCustomWaterRisk(payload) {
+    return request('/api/water/calculate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  // 7B. CGWB Groundwater In-situ Monitoring
+  async getGroundwaterSummary() {
+    return request('/api/water/groundwater/summary');
+  },
+
+  async getGroundwaterStations(district = 'Ahmedabad') {
+    const qs = district ? `?district=${encodeURIComponent(district)}` : '';
+    return request(`/api/water/groundwater/stations${qs}`);
+  },
+
+  async getGroundwaterObservations(params = {}) {
+    const query = new URLSearchParams();
+    if (params.station_id) query.append('station_id', params.station_id);
+    if (params.district) query.append('district', params.district);
+    if (params.limit !== undefined) query.append('limit', params.limit);
+    if (params.offset !== undefined) query.append('offset', params.offset);
+    const qs = query.toString() ? `?${query.toString()}` : '';
+    return request(`/api/water/groundwater/observations${qs}`);
+  },
+
+  async getGroundwaterTrends(params = {}) {
+    const query = new URLSearchParams();
+    if (params.district) query.append('district', params.district);
+    if (params.station_name) query.append('station_name', params.station_name);
+    const qs = query.toString() ? `?${query.toString()}` : '';
+    return request(`/api/water/groundwater/trends${qs}`);
+  },
+
+  // 7C. CWC Reservoir Storage Bulletins
+  async getReservoirs(maxAgeDays = 30) {
+    return request(`/api/water/reservoirs?max_age_days=${maxAgeDays}`);
+  },
+
+  async getReservoirObservations(params = {}) {
+    const query = new URLSearchParams();
+    if (params.reservoir_name) query.append('reservoir_name', params.reservoir_name);
+    if (params.limit !== undefined) query.append('limit', params.limit);
+    const qs = query.toString() ? `?${query.toString()}` : '';
+    return request(`/api/water/reservoirs/observations${qs}`);
+  },
+
+  async getReservoirsSummary() {
+    return request('/api/water/reservoirs/summary');
   },
 
   // 8. Action Centre Unified Dashboard
@@ -241,6 +312,19 @@ export const ClimateShieldAPI = {
 
   async getDataFusion() {
     return request('/api/data-sources/fusion');
+  },
+
+  // 21. Water Scarcity / Drought Advisory
+  async issueWaterAdvisory(payload) {
+    return request('/api/water/advisory', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  // 22. Authentic Multi-Component System Health Diagnostics
+  async getSystemHealth() {
+    return request('/api/system/health');
   },
 };
 

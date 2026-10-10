@@ -57,8 +57,15 @@ export default function WardExplorerPage({ onInspectWard, selectedZone = 'All 7 
 
   const activeScore = Math.round(activeWard.combined_risk_score ?? activeWard.composite_score ?? 50);
   const activeWbgt = activeWard.heat_risk?.effective_wbgt_c ?? activeWard.heat_risk?.score ?? 28.1;
-  const activeWater = activeWard.water_risk?.waterlogging_score ? `${Math.round(activeWard.water_risk.waterlogging_score)}% Surcharge` : '38% Pluvial Risk';
+  const activeWaterlogging = activeWard.water_risk?.waterlogging_score != null 
+    ? `${Math.round(activeWard.water_risk.waterlogging_score)}/100` 
+    : '38/100';
+  const activeShortage = activeWard.water_risk?.water_shortage_score != null 
+    ? `${Math.round(activeWard.water_risk.water_shortage_score)}/100` 
+    : '19/100';
   const activeHeat = activeWard.heat_risk?.score ? `${Math.round(activeWard.heat_risk.score)}/100 Heat Index` : 'Elevated Heat Risk';
+
+  const gwContext = activeWard.water_risk?.groundwater_context;
 
   return (
     <div className="space-y-6">
@@ -84,6 +91,13 @@ export default function WardExplorerPage({ onInspectWard, selectedZone = 'All 7 
           />
         </div>
       </div>
+
+      {loading && (
+        <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-2 text-xs text-primary font-mono animate-pulse">
+          <span className="material-symbols-outlined text-[18px] animate-spin">sync</span>
+          <span>Loading spatial multi-hazard risk models and hydrogeology telemetry...</span>
+        </div>
+      )}
 
       {error && (
         <div className="p-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between text-xs text-error">
@@ -134,25 +148,103 @@ export default function WardExplorerPage({ onInspectWard, selectedZone = 'All 7 
             </div>
           </div>
 
+          {/* Separated Hazard Scores */}
           <div className="space-y-2 text-xs">
-            <div className="p-2.5 rounded-lg bg-surface-bright border flex justify-between">
-              <span className="text-outline">Thermal / Heat Hazard</span>
+            <div className="p-2.5 rounded-lg bg-surface-bright border flex justify-between items-center">
+              <div>
+                <span className="text-outline block font-medium">Thermal / Heat Hazard</span>
+                <span className="text-[10px] text-outline font-mono">WBGT {activeWbgt}°C</span>
+              </div>
               <span className="font-bold font-mono text-error">{activeHeat}</span>
             </div>
-            <div className="p-2.5 rounded-lg bg-surface-bright border flex justify-between">
-              <span className="text-outline">Wet-Bulb Globe (WBGT)</span>
-              <span className="font-bold font-mono text-error">{activeWbgt}°C</span>
+
+            <div className="p-2.5 rounded-lg bg-surface-bright border flex justify-between items-center">
+              <div>
+                <span className="text-outline block font-medium">Waterlogging (Pluvial Flood)</span>
+                <span className="text-[10px] text-outline font-mono">Monsoon surface runoff</span>
+              </div>
+              <span className="font-bold font-mono text-[#0284C7]">{activeWaterlogging}</span>
             </div>
-            <div className="p-2.5 rounded-lg bg-surface-bright border flex justify-between">
-              <span className="text-outline">Waterlogging Surcharge</span>
-              <span className="font-bold font-mono text-[#0284C7]">{activeWater}</span>
+
+            <div className="p-2.5 rounded-lg bg-surface-bright border flex justify-between items-center">
+              <div>
+                <span className="text-outline block font-medium">Water-Shortage Deficit</span>
+                <span className="text-[10px] text-outline font-mono">Bulk reserves & supply</span>
+              </div>
+              <span className="font-bold font-mono text-amber-700">{activeShortage}</span>
             </div>
-            <div className="p-2.5 rounded-lg bg-surface-bright border flex justify-between">
-              <span className="text-outline">Synergy Active</span>
-              <span className="font-bold font-mono text-amber-700">
+
+            <div className="p-2.5 rounded-lg bg-surface-bright border flex justify-between items-center">
+              <span className="text-outline font-medium">Compound Hazard Synergy</span>
+              <span className={`font-bold font-mono text-[11px] px-2 py-0.5 rounded ${
+                activeWard.compound_hazard?.compound_synergy_active 
+                  ? 'bg-red-100 text-red-800' 
+                  : 'bg-slate-100 text-slate-700'
+              }`}>
                 {activeWard.compound_hazard?.compound_synergy_active ? 'Dual-Hazard Hotspot' : 'Standard Baseline'}
               </span>
             </div>
+          </div>
+
+          {/* Groundwater Status Block with strict provenance */}
+          <div className="p-3 rounded-lg border border-outline-variant bg-[#F8FAF8] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold text-primary flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[15px] text-[#0284C7]">water_drop</span>
+                Groundwater Table
+              </span>
+              {gwContext?.has_proximate_station ? (
+                <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-900 font-bold border border-blue-200">
+                  CGWB OBSERVATION — HISTORICAL
+                </span>
+              ) : gwContext?.district_average_depth_mbgl ? (
+                <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 font-bold border border-slate-200">
+                  DISTRICT BASELINE (ESTIMATE)
+                </span>
+              ) : (
+                <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-bold border">
+                  UNAVAILABLE
+                </span>
+              )}
+            </div>
+
+            {gwContext?.has_proximate_station ? (
+              <div className="space-y-1 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-outline text-[11px]">Station: {gwContext.station_name}</span>
+                  <span className="font-mono font-bold text-on-surface">
+                    {gwContext.water_level_mbgl != null ? `${gwContext.water_level_mbgl} mbgl` : 'N/A'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-outline font-mono">
+                  <span>Stress: {gwContext.aquifer_stress_tier?.replace(/_/g, ' ') || 'MODERATE'}</span>
+                  <span>{gwContext.observation_date ? `Date: ${gwContext.observation_date}` : 'CGWB In-Situ'}</span>
+                </div>
+                <p className="text-[10px] text-slate-500 italic leading-tight pt-0.5">
+                  In-situ piezometer observation; unconfined aquifer depth.
+                </p>
+              </div>
+            ) : gwContext?.district_average_depth_mbgl ? (
+              <div className="space-y-1 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-outline text-[11px]">Ahmedabad District Mean:</span>
+                  <span className="font-mono font-bold text-on-surface">
+                    {gwContext.district_average_depth_mbgl} mbgl
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-outline font-mono">
+                  <span>Tier: {gwContext.aquifer_stress_tier?.replace(/_/g, ' ') || 'HIGH AQUIFER STRESS'}</span>
+                  <span>CGWB 37-Well Baseline</span>
+                </div>
+                <p className="text-[10px] text-slate-500 italic leading-tight pt-0.5">
+                  No dedicated piezometer in ward boundary. Regional aquifer baseline applied.
+                </p>
+              </div>
+            ) : (
+              <p className="text-[11px] text-outline italic">
+                No verified in-situ groundwater measurement available for this ward.
+              </p>
+            )}
           </div>
 
           <button

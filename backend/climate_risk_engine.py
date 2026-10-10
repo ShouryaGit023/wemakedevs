@@ -543,6 +543,7 @@ def match_and_combine_ward_risks(
                 "waterlogging_score": waterlogging_score,
                 "water_shortage_score": water_shortage_score,
                 "contributing_factors": water_factors,
+                "groundwater_context": w_entry.get("groundwater_context") if w_entry else None,
                 "explanation": water_explanation,
                 "data_source": water_data_source,
                 "timestamp": water_timestamp
