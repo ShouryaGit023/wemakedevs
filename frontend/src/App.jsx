@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Sidebar from './components/Sidebar';
 import TopAppBar from './components/TopAppBar';
 import OverviewPage from './pages/OverviewPage';
@@ -10,6 +10,7 @@ import SystemStatusPage from './pages/SystemStatusPage';
 import IssueAdvisoryModal from './components/IssueAdvisoryModal';
 import WardInspectionModal from './components/WardInspectionModal';
 import { TOP_RISK_WARDS } from './data/mockData';
+import { ClimateShieldAPI } from './services/api';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('overview');
@@ -18,10 +19,31 @@ export default function App() {
   const [inspectedWard, setInspectedWard] = useState(TOP_RISK_WARDS[0]);
   const [isInspectionModalOpen, setIsInspectionModalOpen] = useState(false);
   const [selectedZone, setSelectedZone] = useState('All 7 Zones');
+  const [liveWeather, setLiveWeather] = useState(null);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+
+  const fetchGlobalTelemetry = useCallback(async () => {
+    try {
+      const res = await ClimateShieldAPI.getWeatherWBGT();
+      if (res && res.current_heat_status) {
+        setLiveWeather(res.current_heat_status);
+      }
+    } catch (err) {
+      console.warn('Could not load global weather telemetry:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchGlobalTelemetry();
+  }, [fetchGlobalTelemetry, refreshTrigger]);
 
   const handleInspectWard = (ward) => {
     setInspectedWard(ward);
     setIsInspectionModalOpen(true);
+  };
+
+  const handleRefreshAll = () => {
+    setRefreshTrigger(prev => prev + 1);
   };
 
   return (
@@ -42,13 +64,17 @@ export default function App() {
           onOpenMobileMenu={() => setIsMobileMenuOpen(true)}
           selectedZone={selectedZone}
           onSelectZone={setSelectedZone}
-          onRefreshData={() => console.log('Refreshing telemetry...')}
+          onRefreshData={handleRefreshAll}
+          liveWeather={liveWeather}
+          activeAlertsCount={3}
         />
 
         {/* Scrollable Main Content Canvas */}
         <main className="flex-1 overflow-y-auto px-4 lg:px-margin-desktop py-space-md">
           {activeTab === 'overview' && (
             <OverviewPage 
+              key={`overview-${refreshTrigger}`}
+              selectedZone={selectedZone}
               onOpenAdvisory={() => setIsAdvisoryModalOpen(true)}
               onInspectWard={handleInspectWard}
             />
@@ -56,24 +82,35 @@ export default function App() {
 
           {activeTab === 'action-centre' && (
             <ActionCentrePage 
+              key={`action-centre-${refreshTrigger}`}
               onOpenDeployModal={() => setIsAdvisoryModalOpen(true)}
             />
           )}
 
           {activeTab === 'verification' && (
-            <ImpactVerificationPage />
+            <ImpactVerificationPage 
+              key={`verification-${refreshTrigger}`}
+            />
           )}
 
           {activeTab === 'ward-explorer' && (
-            <WardExplorerPage onInspectWard={handleInspectWard} />
+            <WardExplorerPage 
+              key={`ward-explorer-${refreshTrigger}`}
+              selectedZone={selectedZone}
+              onInspectWard={handleInspectWard} 
+            />
           )}
 
           {activeTab === 'planner' && (
-            <InterventionPlannerPage />
+            <InterventionPlannerPage 
+              key={`planner-${refreshTrigger}`}
+            />
           )}
 
           {activeTab === 'system-status' && (
-            <SystemStatusPage />
+            <SystemStatusPage 
+              key={`status-${refreshTrigger}`}
+            />
           )}
         </main>
       </div>

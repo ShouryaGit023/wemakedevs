@@ -1,7 +1,14 @@
 import React, { useState } from 'react';
 import { MUNICIPAL_OFFICERS, AHMEDABAD_ZONES } from '../data/mockData';
 
-export default function TopAppBar({ onOpenMobileMenu, selectedZone, onSelectZone, onRefreshData }) {
+export default function TopAppBar({ 
+  onOpenMobileMenu, 
+  selectedZone, 
+  onSelectZone, 
+  onRefreshData,
+  liveWeather,
+  activeAlertsCount = 3
+}) {
   const [officerIndex, setOfficerIndex] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showZoneDropdown, setShowZoneDropdown] = useState(false);
@@ -14,6 +21,10 @@ export default function TopAppBar({ onOpenMobileMenu, selectedZone, onSelectZone
     if (onRefreshData) onRefreshData();
     setTimeout(() => setIsRefreshing(false), 800);
   };
+
+  const tempDisplay = liveWeather?.temperature_c ? `${liveWeather.temperature_c}°C` : '35.7°C';
+  const wbgtDisplay = liveWeather?.wbgt_outdoor_c ? `WBGT ${liveWeather.wbgt_outdoor_c}°C` : 'WBGT 28.7°C';
+  const heatLabel = liveWeather?.hazard_level || 'Moderate Heat Watch';
 
   return (
     <header className="bg-surface-container-lowest border-b border-outline-variant h-14 shrink-0 flex items-center justify-between px-4 lg:px-margin-desktop z-40 shadow-xs select-none sticky top-0">
@@ -77,7 +88,7 @@ export default function TopAppBar({ onOpenMobileMenu, selectedZone, onSelectZone
         <div className="hidden xl:flex items-center gap-2 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200">
           <span className="h-2 w-2 rounded-full bg-emerald-600 animate-pulse"></span>
           <span className="font-mono text-[10px] text-emerald-800 font-semibold tracking-normal">
-            IMD & AMC Sensor Stream: Live (Synced 8m ago)
+            IMD & AMC Sensor Stream: Live (Synced Just Now)
           </span>
         </div>
       </div>
@@ -87,7 +98,9 @@ export default function TopAppBar({ onOpenMobileMenu, selectedZone, onSelectZone
         {/* Weather / Alert Quick Pill */}
         <div className="hidden md:flex items-center gap-2 bg-[#FEF2F2] border border-[#FECACA] px-3 py-1 rounded-lg">
           <span className="material-symbols-outlined text-[#DC2626] text-[18px]">thermostat</span>
-          <span className="font-mono text-[11px] text-[#991B1B] font-bold">43.8°C Extreme Heat Alert</span>
+          <span className="font-mono text-[11px] text-[#991B1B] font-bold">
+            {tempDisplay} {heatLabel} ({wbgtDisplay})
+          </span>
           <span className="text-outline-variant">|</span>
           <span className="material-symbols-outlined text-[#0284C7] text-[18px]">waves</span>
           <span className="font-mono text-[11px] text-[#075985]">Sabarmati: Normal</span>
@@ -98,10 +111,12 @@ export default function TopAppBar({ onOpenMobileMenu, selectedZone, onSelectZone
           <button 
             className="relative p-1.5 sm:p-2 text-on-surface-variant hover:bg-surface-container-low rounded-lg transition-colors cursor-pointer" 
             title="Operational Alerts"
-            onClick={() => alert("Alerts Feed: 3 active advisories broadcasted to East & South zone UHC units.")}
+            onClick={() => alert(`Alerts Feed: ${activeAlertsCount} active advisories broadcasted to AMC Emergency Centers.`)}
           >
             <span className="material-symbols-outlined text-[20px]">notifications</span>
-            <span className="absolute top-1 right-1 flex h-4 w-4 items-center justify-center rounded-full bg-error text-white font-mono text-[9px] font-bold">3</span>
+            <span className="absolute top-1 right-1 flex h-4 w-4 items-center justify-center rounded-full bg-error text-white font-mono text-[9px] font-bold">
+              {activeAlertsCount}
+            </span>
           </button>
           
           <button 

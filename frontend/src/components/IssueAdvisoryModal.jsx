@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
+import { ClimateShieldAPI } from '../services/api';
 
-export default function IssueAdvisoryModal({ isOpen, onClose }) {
+export default function IssueAdvisoryModal({ isOpen, onClose, onAdvisoryIssued }) {
   const [selectedTier, setSelectedTier] = useState('Orange');
   const [selectedZones, setSelectedZones] = useState(['East Zone', 'South Zone']);
   const [channels, setChannels] = useState({
@@ -11,19 +12,41 @@ export default function IssueAdvisoryModal({ isOpen, onClose }) {
   });
   const [isBroadcasting, setIsBroadcasting] = useState(false);
   const [broadcastSuccess, setBroadcastSuccess] = useState(false);
+  const [errorMsg, setErrorMsg] = useState(null);
 
   if (!isOpen) return null;
 
-  const handleBroadcast = () => {
+  const handleBroadcast = async () => {
     setIsBroadcasting(true);
-    setTimeout(() => {
+    setErrorMsg(null);
+    try {
+      // Connect to real Action Centre backend endpoint
+      await ClimateShieldAPI.createManualAction({
+        ward_id: "AMC-CENTRAL",
+        ward_name: `Ahmedabad Citywide (${selectedZones.join(', ')})`,
+        action_type: "heat_alert",
+        priority: selectedTier === 'Red' ? 'critical' : selectedTier === 'Orange' ? 'high' : 'medium',
+        reason: `Heat Action Plan (HAP) Tier ${selectedTier} municipal advisory authorized. Priority zones: ${selectedZones.join(', ')}. Channels: ${Object.keys(channels).filter(k => channels[k]).join(', ')}.`,
+        required_resources: {
+          cost_inr: selectedTier === 'Red' ? 50000 : 20000,
+          crew_required: selectedTier === 'Red' ? 12 : 6,
+          water_required_l: channels.waterTankers ? 30000 : 0
+        },
+        related_hazard: "heat",
+        risk_score: selectedTier === 'Red' ? 88.0 : selectedTier === 'Orange' ? 75.0 : 50.0
+      });
+
       setIsBroadcasting(false);
       setBroadcastSuccess(true);
+      if (onAdvisoryIssued) onAdvisoryIssued();
       setTimeout(() => {
         setBroadcastSuccess(false);
         onClose();
-      }, 1500);
-    }, 1000);
+      }, 1600);
+    } catch (err) {
+      setIsBroadcasting(false);
+      setErrorMsg(err.message || 'Failed to authorize advisory via backend API.');
+    }
   };
 
   return (
@@ -47,14 +70,21 @@ export default function IssueAdvisoryModal({ isOpen, onClose }) {
 
         {/* Content */}
         <div className="p-5 space-y-4">
+          {errorMsg && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-error flex items-center gap-2">
+              <span className="material-symbols-outlined text-[16px]">error</span>
+              <span>{errorMsg}</span>
+            </div>
+          )}
+
           {broadcastSuccess ? (
             <div className="p-6 text-center space-y-2">
               <div className="w-12 h-12 bg-emerald-100 text-emerald-800 rounded-full flex items-center justify-center mx-auto">
                 <span className="material-symbols-outlined text-[28px]">check_circle</span>
               </div>
-              <h4 className="font-bold text-base text-primary">Advisory Broadcast Dispatched!</h4>
+              <h4 className="font-bold text-base text-primary">Advisory Broadcast Dispatched & Recorded!</h4>
               <p className="text-xs text-on-surface-variant">
-                Alert Tier {selectedTier} transmitted to 108 Emergency, Paldi Disaster Cell, and Urban Health Centres.
+                Alert Tier {selectedTier} persisted to Action Centre queue and authorized for municipal dispatch.
               </p>
             </div>
           ) : (
@@ -186,7 +216,7 @@ export default function IssueAdvisoryModal({ isOpen, onClose }) {
               className="px-4 py-1.5 rounded-lg bg-error hover:bg-[#991B1B] text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm active:scale-98 cursor-pointer disabled:opacity-60"
             >
               <span className="material-symbols-outlined text-[16px]">broadcast_on_home</span>
-              <span>{isBroadcasting ? 'Broadcasting...' : `Authorize Tier ${selectedTier} Broadcast`}</span>
+              <span>{isBroadcasting ? 'Broadcasting to Action Centre...' : `Authorize Tier ${selectedTier} Broadcast`}</span>
             </button>
           </div>
         )}

@@ -1,0 +1,13 @@
+{
+  "key": "93c3d2bc4211d79b008f352af585caa9da75da4b440acd1094530d50d2cb718e",
+  "namespace": "ecostress_cmr",
+  "params": {
+    "product_type": "ET",
+    "short_name": "ECO3ETPTJ",
+    "temporal": "2026-09-10T00:00:00Z,2026-10-10T23:59:59Z",
+    "bbox": "72.3,22.8,72.8,23.3"
+  },
+  "created_at": 1791624176.5404124,
+  "expires_at": 1791710576.5404124,
+  "ttl_seconds": 86400
+}
