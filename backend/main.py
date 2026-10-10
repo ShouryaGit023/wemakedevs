@@ -49,6 +49,7 @@ from backend.data_sources import (
     DataFusionEngine,
     DataSourcesService
 )
+<<<<<<< HEAD
 from backend.learning_loop import (
     PredictionRecordCreate,
     BatchRecommendationCreate,
@@ -90,6 +91,39 @@ from backend.learning_engine import (
     list_model_versions,
     rollback_model_version
 )
+=======
+from backend.action_centre import (
+    get_action_store,
+    generate_actions_from_climate_risk,
+    generate_actions_from_interventions,
+    generate_rule_based_recommendations,
+    build_action_centre_dashboard,
+    get_prioritized_actions,
+    get_ward_wise_action_summary,
+    evaluate_risk_data_freshness,
+    DEFAULT_RECOMMENDATION_THRESHOLDS,
+    RULE_DEFINITIONS,
+    ACTION_RESOURCE_ESTIMATES,
+    ACTION_TYPES,
+    VALID_STATUSES,
+    HUMAN_APPROVAL_NOTICE as ACTION_CENTRE_ADVISORY,
+)
+from backend.impact_verification import (
+    assess_intervention_impact,
+    record_impact_assessment,
+    retrieve_impact_assessment,
+    list_impact_assessments,
+    retrieve_assessment_history,
+    update_impact_assessment,
+    generate_impact_verification_summary,
+    export_learning_loop_signals,
+    ExecutionStatus,
+    SourceType,
+    QualityStatus,
+    ATTRIBUTION_DISCLAIMER
+)
+from backend.database import DuplicateAssessmentError
+>>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e
 
 app = FastAPI(
     title="ClimateShield API - Ahmedabad Heat Decision Support",
@@ -150,6 +184,7 @@ def read_root():
             "/api/data-sources/era5",
             "/api/data-sources/ecostress",
             "/api/data-sources/fusion",
+<<<<<<< HEAD
             "/api/learning/predictions",
             "/api/learning/recommendations",
             "/api/learning/actions",
@@ -160,6 +195,19 @@ def read_root():
             "/api/learning/evaluate",
             "/api/learning/active-parameters",
             "/api/learning/versions"
+=======
+            "/api/action-centre/dashboard",
+            "/api/action-centre/actions",
+            "/api/action-centre/actions/{action_id}",
+            "/api/action-centre/actions/{action_id}/status",
+            "/api/action-centre/generate-from-risk",
+            "/api/action-centre/generate-from-interventions",
+            "/api/impact/assessments",
+            "/api/impact/assessments/{assessment_id}",
+            "/api/impact/wards/{ward_id}",
+            "/api/impact/summary",
+            "/api/impact/learning-signals",
+>>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e
         ]
     }
 
@@ -1092,6 +1140,7 @@ async def optimize_from_fused_data(req: FusedOptimizationRequest):
 
 
 # -------------------------------------------------------------
+<<<<<<< HEAD
 # LEARNING LOOP: DATA RECORDING & LINEAGE ENDPOINTS
 # -------------------------------------------------------------
 
@@ -1477,3 +1526,577 @@ async def rollback_version_endpoint(version_id: str, req: ProposalApprovalReques
 
 
 
+=======
+# ACTION CENTRE ENDPOINTS
+# -------------------------------------------------------------
+
+class ActionStatusUpdateRequest(BaseModel):
+    new_status: str = Field(..., description=f"Target status. Must be one of: {VALID_STATUSES}")
+    changed_by: str = Field("operator", description="Identity of the person/system making the change")
+    notes: Optional[str] = Field(None, description="Optional notes about the status change")
+
+
+class ManualActionRequest(BaseModel):
+    ward_id: str = Field(..., description="Ward identifier (e.g. W1, W7)")
+    ward_name: str = Field("", description="Ward display name")
+    action_type: str = Field(..., description=f"Action type. Must be one of: {ACTION_TYPES}")
+    priority: str = Field("medium", description="Priority level: critical, high, medium, low")
+    reason: str = Field(..., description="Why this action is recommended")
+    required_resources: Optional[Dict[str, Any]] = Field(None, description="Resource requirements")
+    related_hazard: Optional[str] = Field(None, description="Related hazard: heat, waterlogging, water_shortage")
+    risk_score: Optional[float] = Field(None, ge=0.0, le=100.0, description="Associated risk score 0-100")
+
+
+class RecommendationRequest(BaseModel):
+    scenario_id: Optional[str] = Field(None, description="Optional climate demo scenario ID")
+    available_budget_inr: Optional[float] = Field(None, ge=0.0, description="Municipal budget ceiling in INR")
+    available_crew: Optional[int] = Field(None, ge=0, description="Available emergency staff / crew count")
+    available_water_l: Optional[float] = Field(None, ge=0.0, description="Available emergency water cap in Liters")
+    threshold_overrides: Optional[Dict[str, float]] = Field(None, description="Custom rule threshold overrides")
+    persist_to_store: bool = Field(True, description="Whether to persist generated recommendations into the Action Store")
+    enforce_resource_constraints: bool = Field(True, description="Whether to filter out actions exceeding available resources")
+
+
+@app.get("/api/action-centre/dashboard")
+async def get_action_centre_dashboard(
+    scenario_id: Optional[str] = Query(None, description="Optional climate demo scenario ID"),
+    force_refresh: bool = Query(False, description="Force fresh climate risk evaluation")
+):
+    """
+    Returns the unified Action Centre dashboard:
+    - High-risk Ahmedabad wards (combined score >= 50.0) with contributing heat & water factors.
+    - Overall action summary by operational status (proposed, approved, in_progress, completed, cancelled).
+    - Ward-wise action aggregation correlating active dispatches with risk profiles.
+    - Prioritized action queue sorted by risk severity, urgency, and recency.
+    - Data freshness & staleness indicator (safely falls back if risk engine is temporarily offline).
+    """
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk(
+            scenario_id=scenario_id,
+            force_refresh=force_refresh
+        )
+        data_quality = climate_data.get("data_quality_and_confidence", None)
+    except Exception as e:
+        # Graceful fallback: Action Centre operates in decoupled store-only mode if risk engine is unavailable
+        climate_data = None
+        data_quality = {
+            "status": "UNAVAILABLE",
+            "warning": f"Risk assessment engine temporarily unavailable: {str(e)}",
+            "fallback_mode": "STORE_ONLY",
+        }
+
+    dashboard = build_action_centre_dashboard(
+        climate_risk_data=climate_data,
+        data_quality=data_quality,
+    )
+    return dashboard
+
+
+@app.get("/api/action-centre/actions/prioritized")
+def list_prioritized_actions(
+    ward_id: Optional[str] = Query(None, description="Optional filter by ward ID or name"),
+    action_type: Optional[str] = Query(None, description="Optional filter by action type"),
+    status: Optional[str] = Query(None, description="Optional filter by status"),
+    limit: int = Query(50, ge=1, le=500, description="Maximum number of prioritized actions to return")
+):
+    """
+    Returns an operational queue of actions sorted strictly by decision priority:
+    1. Priority level: critical > high > medium > low
+    2. Status urgency: in_progress > approved > proposed > completed > cancelled
+    3. Associated risk score descending
+    4. Creation recency
+    """
+    if status and status not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status filter '{status}'. Must be one of: {VALID_STATUSES}"
+        )
+    if action_type and action_type not in ACTION_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid action_type filter '{action_type}'. Must be one of: {ACTION_TYPES}"
+        )
+
+    store = get_action_store()
+    actions = get_prioritized_actions(
+        store=store,
+        ward_id=ward_id,
+        action_type=action_type,
+        status=status,
+        limit=limit,
+    )
+    return {
+        "status": "SUCCESS",
+        "total_actions": len(actions),
+        "limit": limit,
+        "filters_applied": {
+            "ward_id": ward_id,
+            "action_type": action_type,
+            "status": status,
+        },
+        "prioritized_actions": actions,
+        "advisory": ACTION_CENTRE_ADVISORY,
+    }
+
+
+@app.get("/api/action-centre/actions/ward-summary")
+async def get_ward_action_summary_endpoint(
+    scenario_id: Optional[str] = Query(None, description="Optional climate demo scenario ID to correlate risk scores")
+):
+    """
+    Returns a ward-wise aggregation of all actions in the Action Centre.
+    Correlates active actions with each ward's combined risk profile,
+    reporting active action count, breakdown by status, and highest priority.
+    """
+    climate_data = None
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk(
+            scenario_id=scenario_id
+        )
+    except Exception:
+        climate_data = None
+
+    store = get_action_store()
+    summaries = get_ward_wise_action_summary(
+        store=store,
+        climate_risk_data=climate_data,
+    )
+    return {
+        "status": "SUCCESS",
+        "total_wards_with_actions": len(summaries),
+        "ward_summaries": summaries,
+        "climate_risk_correlated": climate_data is not None,
+        "advisory": ACTION_CENTRE_ADVISORY,
+    }
+
+
+@app.get("/api/action-centre/actions")
+def list_action_centre_actions(
+    ward_id: Optional[str] = Query(None, description="Filter by ward ID or name"),
+    action_type: Optional[str] = Query(None, description=f"Filter by action type"),
+    status: Optional[str] = Query(None, description=f"Filter by status")
+):
+    """
+    Lists all Action Centre actions with optional filters by ward, type, or status.
+    """
+    if status and status not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status filter '{status}'. Must be one of: {VALID_STATUSES}"
+        )
+    if action_type and action_type not in ACTION_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid action_type filter '{action_type}'. Must be one of: {ACTION_TYPES}"
+        )
+
+    store = get_action_store()
+    actions = store.list_actions(ward_id=ward_id, action_type=action_type, status=status)
+    return {
+        "status": "SUCCESS",
+        "total_actions": len(actions),
+        "filters_applied": {
+            "ward_id": ward_id,
+            "action_type": action_type,
+            "status": status,
+        },
+        "actions": actions,
+        "advisory": ACTION_CENTRE_ADVISORY,
+    }
+
+
+@app.get("/api/action-centre/actions/{action_id}")
+def get_action_centre_action(action_id: str):
+    """
+    Retrieves a single action record by its ID, including full status history.
+    """
+    store = get_action_store()
+    action = store.get_action(action_id)
+    if not action:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Action '{action_id}' not found in the Action Centre."
+        )
+    return {"status": "SUCCESS", "action": action}
+
+
+@app.put("/api/action-centre/actions/{action_id}/status")
+def update_action_status(action_id: str, req: ActionStatusUpdateRequest):
+    """
+    Updates the status of an existing action. Enforces valid state transitions:
+    proposed → approved → in_progress → completed
+    Any non-terminal state → cancelled
+    """
+    store = get_action_store()
+    try:
+        updated = store.update_status(
+            action_id=action_id,
+            new_status=req.new_status,
+            changed_by=req.changed_by,
+            notes=req.notes,
+        )
+        return {"status": "SUCCESS", "action": updated}
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Action '{action_id}' not found in the Action Centre."
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/api/action-centre/create")
+def create_manual_action(req: ManualActionRequest):
+    """
+    Manually creates a new action record in the Action Centre.
+    """
+    store = get_action_store()
+    try:
+        action = store.create_action(
+            ward_id=req.ward_id,
+            ward_name=req.ward_name,
+            action_type=req.action_type,
+            priority=req.priority,
+            reason=req.reason,
+            required_resources=req.required_resources,
+            related_hazard=req.related_hazard,
+            risk_score=req.risk_score,
+            source="manual",
+        )
+        return {"status": "SUCCESS", "action": action}
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/api/action-centre/generate-from-risk")
+async def generate_actions_from_risk_endpoint(
+    scenario_id: Optional[str] = Query(None, description="Optional climate demo scenario ID")
+):
+    """
+    Reads existing Combined Climate Risk Engine output and generates proposed
+    heat-alert actions for high-risk wards. Does NOT recalculate risk.
+    """
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk(
+            scenario_id=scenario_id
+        )
+        result = generate_actions_from_climate_risk(climate_data)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate actions from climate risk: {str(e)}"
+        )
+
+
+@app.post("/api/action-centre/generate-from-interventions")
+async def generate_actions_from_interventions_endpoint(
+    scenario_id: Optional[str] = Query(None, description="Optional climate demo scenario ID"),
+    total_budget_inr: float = Query(500000.0, ge=10000, le=10000000),
+    total_crew_members: int = Query(40, ge=1, le=500),
+    total_water_cap_l: float = Query(30000.0, ge=1000, le=500000),
+    equity_slider: float = Query(0.5, ge=0.0, le=1.0)
+):
+    """
+    Reads existing Intervention Engine output and creates trackable actions.
+    Uses cached/fresh combined climate risk to produce the intervention plan,
+    then converts dispatch items into Action Centre records.
+    """
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk(
+            scenario_id=scenario_id
+        )
+        wards_to_use = climate_data.get("ranked_wards", climate_data.get("wards", []))
+
+        plan = generate_intervention_recommendations(
+            wards=wards_to_use,
+            total_budget_inr=total_budget_inr,
+            total_crew_members=total_crew_members,
+            total_water_cap_l=total_water_cap_l,
+            equity_slider=equity_slider,
+        )
+        result = generate_actions_from_interventions(plan)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate actions from interventions: {str(e)}"
+        )
+
+
+@app.get("/api/action-centre/metadata")
+def get_action_centre_metadata():
+    """
+    Returns Action Centre configuration metadata: supported action types,
+    valid statuses, and status transition rules.
+    """
+    from backend.action_centre import VALID_STATUS_TRANSITIONS
+    return {
+        "status": "SUCCESS",
+        "action_types": ACTION_TYPES,
+        "valid_statuses": VALID_STATUSES,
+        "status_transitions": {
+            k: sorted(v) for k, v in VALID_STATUS_TRANSITIONS.items()
+        },
+        "advisory": ACTION_CENTRE_ADVISORY,
+    }
+
+
+@app.post("/api/action-centre/recommendations")
+async def generate_recommendations_endpoint(req: Optional[RecommendationRequest] = None):
+    """
+    Generates transparent, explainable, rule-based recommendations for high-risk Ahmedabad wards.
+    Reads existing risk engine outputs and Optimizer recommendations without recalculating risk.
+    Enforces duplicate prevention and respects municipal staff/budget/water resource constraints.
+    """
+    if req is None:
+        req = RecommendationRequest()
+
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk(
+            scenario_id=req.scenario_id
+        )
+
+        resource_constraints = None
+        if any(x is not None for x in (req.available_budget_inr, req.available_crew, req.available_water_l)):
+            resource_constraints = {
+                "available_budget_inr": req.available_budget_inr,
+                "available_crew": req.available_crew,
+                "available_water_l": req.available_water_l,
+            }
+
+        result = generate_rule_based_recommendations(
+            climate_risk_data=climate_data,
+            resource_constraints=resource_constraints,
+            thresholds=req.threshold_overrides,
+            create_in_store=req.persist_to_store,
+            enforce_resource_constraints=req.enforce_resource_constraints,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate rule-based recommendations: {str(e)}"
+        )
+
+
+@app.get("/api/action-centre/recommendations/rules")
+def get_recommendation_rules_metadata():
+    """
+    Returns active recommendation rule definitions, default thresholds,
+    and standard municipal resource schedules.
+    """
+    return {
+        "status": "SUCCESS",
+        "rules": RULE_DEFINITIONS,
+        "default_thresholds": DEFAULT_RECOMMENDATION_THRESHOLDS,
+        "resource_estimates": ACTION_RESOURCE_ESTIMATES,
+        "advisory": ACTION_CENTRE_ADVISORY,
+    }
+
+
+# -------------------------------------------------------------
+# IMPACT VERIFICATION ENDPOINTS
+# -------------------------------------------------------------
+
+class ImpactAssessmentSubmissionRequest(BaseModel):
+    assessment_id: Optional[str] = Field(None, description="Optional custom assessment identifier; generated automatically if omitted")
+    intervention_id: str = Field(..., description="ID of the executed intervention (e.g. cooling_center, dewatering_pump_deployment)")
+    ward_id: str = Field(..., description="Target ward ID (e.g. W1 to W48)")
+    intervention_type: str = Field(..., description="Operational category of the intervention")
+    execution_status: str = Field("COMPLETED", description="COMPLETED, DEPLOYED, OBSERVED, IN_PROGRESS, or SYNTHETIC_DEMO")
+    is_synthetic: bool = Field(False, description="Whether data is synthetic demonstration data")
+    provenance_mode: Optional[str] = Field(None, description="MEASURED, EXTERNAL_OBSERVATION, ESTIMATED, or SYNTHETIC_DEMO")
+    observations: Optional[List[Dict[str, Any]]] = Field(None, description="Empirical observations list (engine computes differences)")
+    indicators: Optional[Dict[str, Any]] = Field(None, description="Pre-computed indicators dictionary")
+    baseline_period: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Metadata describing baseline observation window")
+    follow_up_period: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Metadata describing follow-up observation window")
+    allow_update: bool = Field(False, description="Set True to update an existing assessment ID and archive history")
+    change_reason: Optional[str] = Field(None, description="Reason for update if allow_update=True")
+
+
+@app.post("/api/impact/assessments", status_code=201)
+async def submit_impact_assessment(req: ImpactAssessmentSubmissionRequest):
+    """
+    Submits and persists an empirical impact assessment for a deployed/completed intervention.
+    Calculates differences across verified baseline and follow-up observations, enforces unit
+    consistency, and records audit history. Rejects uncompleted or merely recommended interventions.
+    """
+    # Enforce Requirement 5: Do not assume an intervention was completed merely because it was recommended.
+    status_upper = req.execution_status.strip().upper()
+    if status_upper in ["RECOMMENDED", "PENDING_HUMAN_APPROVAL", "PROPOSED", "RECOMMENDATION"]:
+        raise HTTPException(
+            status_code=422,
+            detail="UNCOMPLETED_INTERVENTION: Cannot verify an uncompleted intervention. Recommended interventions without field deployment cannot be verified."
+        )
+
+    if not req.observations and not req.indicators:
+        raise HTTPException(
+            status_code=422,
+            detail="Missing assessment payload: either 'observations' list or 'indicators' dict must be provided."
+        )
+
+    try:
+        is_syn = req.is_synthetic or (status_upper == "SYNTHETIC_DEMO")
+        prov_mode = req.provenance_mode or ("SYNTHETIC_DEMO" if is_syn else "MEASURED")
+
+        if req.observations:
+            assessment_obj = assess_intervention_impact(
+                intervention_id=req.intervention_id,
+                ward_id=req.ward_id,
+                intervention_type=req.intervention_type,
+                observations=req.observations,
+                baseline_period=req.baseline_period,
+                follow_up_period=req.follow_up_period,
+                assessment_id=req.assessment_id
+            )
+            saved_record = record_impact_assessment(
+                assessment=assessment_obj,
+                execution_status=status_upper,
+                allow_update=req.allow_update,
+                change_reason=req.change_reason
+            )
+        else:
+            payload = {
+                "assessment_id": req.assessment_id or f"VIA_{req.ward_id}_{req.intervention_id}_{int(time.time())}",
+                "intervention_id": req.intervention_id,
+                "ward_id": req.ward_id,
+                "intervention_type": req.intervention_type,
+                "execution_status": status_upper,
+                "is_synthetic": is_syn,
+                "provenance_mode": prov_mode,
+                "baseline_period": req.baseline_period or {},
+                "follow_up_period": req.follow_up_period or {},
+                "indicators": req.indicators,
+                "attribution_disclaimer": ATTRIBUTION_DISCLAIMER
+            }
+            saved_record = record_impact_assessment(
+                assessment=payload,
+                execution_status=status_upper,
+                allow_update=req.allow_update,
+                change_reason=req.change_reason
+            )
+
+        return saved_record
+    except DuplicateAssessmentError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Impact assessment persistence failed: {str(e)}")
+
+
+@app.get("/api/impact/assessments/{assessment_id}")
+async def get_impact_assessment_endpoint(
+    assessment_id: str,
+    include_history: bool = Query(False, description="Whether to include previous archived audit snapshots")
+):
+    """
+    Retrieves a persisted impact assessment by ID.
+    Optionally includes version audit history.
+    """
+    assessment = retrieve_impact_assessment(assessment_id)
+    if not assessment:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Impact assessment '{assessment_id}' not found."
+        )
+
+    if include_history:
+        history = retrieve_assessment_history(assessment_id)
+        assessment["audit_history"] = history
+
+    return assessment
+
+
+@app.get("/api/impact/wards/{ward_id}")
+async def get_ward_impact_assessments_endpoint(
+    ward_id: str,
+    intervention_id: Optional[str] = Query(None, description="Optional filter by intervention ID"),
+    include_synthetic: bool = Query(True, description="Whether to include synthetic demo records"),
+    limit: int = Query(50, ge=1, le=200, description="Max records to return")
+):
+    """
+    Retrieves all available impact assessments for a given ward.
+    Distinguishes real-world empirical assessments from synthetic demonstration records.
+    """
+    norm_wid = ward_id.strip().upper()
+    assessments = list_impact_assessments(ward_id=norm_wid, intervention_id=intervention_id, limit=limit)
+
+    if not include_synthetic:
+        assessments = [a for a in assessments if not a.get("is_synthetic", False)]
+
+    return {
+        "ward_id": norm_wid,
+        "total_assessments": len(assessments),
+        "assessments": assessments
+    }
+
+
+@app.get("/api/impact/summary")
+async def get_impact_summary_endpoint(
+    ward_id: Optional[str] = Query(None, description="Optional ward filter"),
+    intervention_type: Optional[str] = Query(None, description="Optional intervention type filter"),
+    hazard_category: Optional[str] = Query(None, description="Optional hazard category filter: heat, waterlogging, water_shortage"),
+    include_synthetic: bool = Query(False, description="Whether to include synthetic demo records in summary (defaults to False)")
+):
+    """
+    Summarizes available impact assessments across verified, comparable records.
+    Strictly segregates real-world verified outcomes from synthetic demonstration records.
+    Does not invent observations when data is missing.
+    """
+    summary = generate_impact_verification_summary(
+        ward_id=ward_id,
+        intervention_type=intervention_type,
+        hazard_category=hazard_category,
+        include_synthetic=include_synthetic
+    )
+
+    # Legacy fields for backward compatibility
+    summary["total_recorded_assessments_in_db"] = summary["kpis"]["total_assessments_recorded"]
+    summary["empirical_verified_assessments_count"] = (
+        summary["kpis"]["provenance_counts"]["measured"] +
+        summary["kpis"]["provenance_counts"]["external_observation"] +
+        summary["kpis"]["provenance_counts"]["estimated"]
+    )
+    summary["synthetic_demo_assessments_count"] = summary["kpis"]["provenance_counts"]["simulated_demo"]
+    summary["summarized_assessments_count"] = (
+        (summary["empirical_verified_assessments_count"] + summary["synthetic_demo_assessments_count"])
+        if include_synthetic else summary["empirical_verified_assessments_count"]
+    )
+
+    # Convert breakdown structures for backward compatibility
+    interventions_tally = {k: v["total_assessments"] for k, v in summary.get("by_intervention_type", {}).items()}
+    summary["breakdown_by_intervention_type"] = interventions_tally
+
+    hazard_tally = {}
+    for ind_k, ind_v in summary.get("by_indicator", {}).items():
+        h = ind_v.get("hazard_category", "cross_cutting")
+        hazard_tally[h] = hazard_tally.get(h, 0) + ind_v.get("sample_size", 0)
+    summary["breakdown_by_hazard_category"] = hazard_tally
+
+    return summary
+
+
+@app.get("/api/impact/learning-signals")
+async def get_learning_loop_signals_endpoint(
+    ward_id: Optional[str] = Query(None, description="Optional ward filter"),
+    intervention_id: Optional[str] = Query(None, description="Optional intervention filter"),
+    include_synthetic: bool = Query(False, description="Whether to include synthetic demo records (defaults to False)")
+):
+    """
+    Exposes verified empirical outcome records and calibration weights for the Learning Loop.
+    Read-only interface: does not retrain models or alter predictive risk calculations.
+    """
+    signals = export_learning_loop_signals(
+        ward_id=ward_id,
+        intervention_id=intervention_id,
+        include_synthetic=include_synthetic
+    )
+    return {
+        "status": "SUCCESS",
+        "total_signals": len(signals),
+        "data_integrity_mode": "INCLUDES_SIMULATED_DEMO" if include_synthetic else "REAL_WORLD_VERIFIED_ONLY",
+        "signals": signals
+    }
+>>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e

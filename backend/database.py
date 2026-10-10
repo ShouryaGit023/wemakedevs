@@ -90,6 +90,7 @@ def init_db() -> None:
     );
     """)
 
+<<<<<<< HEAD
     # 5. Learning Loop: Historical Risk Predictions
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS predictions (
@@ -282,6 +283,45 @@ def init_db() -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposed_parameter_updates (status);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_versions_active ON model_versions (is_active);")
 
+=======
+    # 5. Verified Impact Assessments
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS impact_assessments (
+        assessment_id TEXT PRIMARY KEY,
+        intervention_id TEXT NOT NULL,
+        ward_id TEXT NOT NULL,
+        intervention_type TEXT NOT NULL,
+        execution_status TEXT NOT NULL DEFAULT 'COMPLETED',
+        verification_status TEXT NOT NULL,
+        provenance_mode TEXT NOT NULL,
+        is_synthetic INTEGER NOT NULL DEFAULT 0,
+        baseline_period_json TEXT NOT NULL,
+        follow_up_period_json TEXT NOT NULL,
+        indicators_json TEXT NOT NULL,
+        calculated_changes_json TEXT NOT NULL,
+        data_quality_warnings_json TEXT NOT NULL,
+        attribution_disclaimer TEXT NOT NULL,
+        summary_json TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """)
+
+    # 6. Impact Assessment Audit History
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS impact_assessment_history (
+        history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        assessment_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        archived_at TEXT NOT NULL,
+        change_reason TEXT,
+        FOREIGN KEY (assessment_id) REFERENCES impact_assessments (assessment_id)
+    );
+    """)
+
+>>>>>>> 9032aed4cb1e1ae4bba390235661fb8e2307eb8e
     conn.commit()
     conn.close()
 
@@ -436,22 +476,248 @@ def insert_outcome_record(
     return record_id
 
 
-def get_outcome_records(limit: int = 50) -> List[Dict[str, Any]]:
-    """Returns recent municipal outcome records."""
+class DuplicateAssessmentError(ValueError):
+    """Raised when attempting to insert an assessment that already exists without explicit update."""
+    pass
+
+
+def _row_to_assessment_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    """Helper to convert a database row to an assessment dictionary with parsed JSON fields."""
+    d = dict(row)
+    d["is_synthetic"] = bool(d.get("is_synthetic", 0))
+    for json_field, target_key in [
+        ("baseline_period_json", "baseline_period"),
+        ("follow_up_period_json", "follow_up_period"),
+        ("indicators_json", "indicators"),
+        ("calculated_changes_json", "calculated_changes"),
+        ("data_quality_warnings_json", "data_quality_warnings"),
+        ("summary_json", "summary"),
+    ]:
+        if json_field in d and d[json_field] is not None:
+            try:
+                d[target_key] = json.loads(d[json_field])
+            except Exception:
+                d[target_key] = {}
+            del d[json_field]
+    return d
+
+
+def save_impact_assessment_record(
+    record: Dict[str, Any],
+    allow_update: bool = False,
+    change_reason: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Saves an impact assessment to the baseline database.
+    - Prevents accidental duplicates by checking assessment_id.
+    - If assessment_id already exists and incoming payload is identical, returns existing record idempotently.
+    - If assessment_id already exists and allow_update is False, raises DuplicateAssessmentError.
+    - If allow_update is True, archives current version to impact_assessment_history and increments version.
+    """
+    assessment_id = record.get("assessment_id")
+    if not assessment_id:
+        raise ValueError("Cannot save assessment: 'assessment_id' is required.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Check if record already exists
+    cursor.execute("SELECT * FROM impact_assessments WHERE assessment_id = ?;", (assessment_id,))
+    existing_row = cursor.fetchone()
+
+    # Prepare serialized JSON fields
+    indicators_val = record.get("indicators", record.get("results_by_indicator", {}))
+    calculated_changes_val = record.get("calculated_changes", {})
+    if not calculated_changes_val and isinstance(indicators_val, dict):
+        calculated_changes_val = {
+            k: {
+                "difference": v.get("difference"),
+                "percentage_change": v.get("percentage_change"),
+                "unit": v.get("unit"),
+                "is_improvement": v.get("is_improvement")
+            }
+            for k, v in indicators_val.items() if isinstance(v, dict)
+        }
+
+    baseline_period_json = json.dumps(record.get("baseline_period", {}), sort_keys=True)
+    follow_up_period_json = json.dumps(record.get("follow_up_period", {}), sort_keys=True)
+    indicators_json = json.dumps(indicators_val, sort_keys=True)
+    calculated_changes_json = json.dumps(calculated_changes_val, sort_keys=True)
+    data_quality_warnings_json = json.dumps(record.get("data_quality_warnings", []), sort_keys=True)
+    summary_json = json.dumps(record.get("summary", {}), sort_keys=True)
+    attribution_disclaimer = record.get("attribution_disclaimer", "")
+    provenance_mode = record.get("provenance_mode", "MEASURED")
+    is_synthetic = 1 if record.get("is_synthetic", False) else 0
+    execution_status = record.get("execution_status", "COMPLETED")
+    verification_status = record.get("verification_status", "VERIFIED")
+    intervention_id = record.get("intervention_id", "")
+    ward_id = record.get("ward_id", "")
+    intervention_type = record.get("intervention_type", "")
+
+    if existing_row:
+        existing_dict = _row_to_assessment_dict(existing_row)
+
+        # Idempotency check: compare core payload
+        is_identical = (
+            existing_row["intervention_id"] == intervention_id and
+            existing_row["ward_id"] == ward_id and
+            existing_row["intervention_type"] == intervention_type and
+            existing_row["indicators_json"] == indicators_json and
+            existing_row["calculated_changes_json"] == calculated_changes_json and
+            existing_row["execution_status"] == execution_status
+        )
+
+        if is_identical:
+            conn.close()
+            existing_dict["save_status"] = "IDEMPOTENT_UNCHANGED"
+            return existing_dict
+
+        if not allow_update:
+            conn.close()
+            raise DuplicateAssessmentError(
+                f"Assessment ID '{assessment_id}' already exists in database. "
+                "Silently overwriting historical records is forbidden. "
+                "To update or re-evaluate, specify allow_update=True."
+            )
+
+        # Archive existing version to audit history
+        current_version = existing_row["version"]
+        snapshot_json = json.dumps(dict(existing_row))
+        cursor.execute("""
+        INSERT INTO impact_assessment_history (assessment_id, version, snapshot_json, archived_at, change_reason)
+        VALUES (?, ?, ?, ?, ?);
+        """, (assessment_id, current_version, snapshot_json, now_iso, change_reason or "Updated via save_impact_assessment_record"))
+
+        # Update current record with incremented version
+        new_version = current_version + 1
+        cursor.execute("""
+        UPDATE impact_assessments
+        SET intervention_id = ?,
+            ward_id = ?,
+            intervention_type = ?,
+            execution_status = ?,
+            verification_status = ?,
+            provenance_mode = ?,
+            is_synthetic = ?,
+            baseline_period_json = ?,
+            follow_up_period_json = ?,
+            indicators_json = ?,
+            calculated_changes_json = ?,
+            data_quality_warnings_json = ?,
+            attribution_disclaimer = ?,
+            summary_json = ?,
+            version = ?,
+            updated_at = ?
+        WHERE assessment_id = ?;
+        """, (
+            intervention_id, ward_id, intervention_type, execution_status, verification_status,
+            provenance_mode, is_synthetic, baseline_period_json, follow_up_period_json,
+            indicators_json, calculated_changes_json, data_quality_warnings_json,
+            attribution_disclaimer, summary_json, new_version, now_iso, assessment_id
+        ))
+        conn.commit()
+        cursor.execute("SELECT * FROM impact_assessments WHERE assessment_id = ?;", (assessment_id,))
+        updated_row = cursor.fetchone()
+        conn.close()
+        res = _row_to_assessment_dict(updated_row)
+        res["save_status"] = "UPDATED_AND_ARCHIVED"
+        return res
+
+    # Insert new record
+    created_at = record.get("created_at") or now_iso
+    updated_at = now_iso
+    cursor.execute("""
+    INSERT INTO impact_assessments (
+        assessment_id, intervention_id, ward_id, intervention_type, execution_status,
+        verification_status, provenance_mode, is_synthetic, baseline_period_json,
+        follow_up_period_json, indicators_json, calculated_changes_json,
+        data_quality_warnings_json, attribution_disclaimer, summary_json,
+        version, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?);
+    """, (
+        assessment_id, intervention_id, ward_id, intervention_type, execution_status,
+        verification_status, provenance_mode, is_synthetic, baseline_period_json,
+        follow_up_period_json, indicators_json, calculated_changes_json,
+        data_quality_warnings_json, attribution_disclaimer, summary_json,
+        created_at, updated_at
+    ))
+    conn.commit()
+    cursor.execute("SELECT * FROM impact_assessments WHERE assessment_id = ?;", (assessment_id,))
+    new_row = cursor.fetchone()
+    conn.close()
+    res = _row_to_assessment_dict(new_row)
+    res["save_status"] = "CREATED"
+    return res
+
+
+def get_impact_assessment_by_id(assessment_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves an impact assessment record by its unique ID."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM impact_assessments WHERE assessment_id = ?;", (assessment_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return _row_to_assessment_dict(row)
+
+
+def get_all_impact_assessments(
+    ward_id: Optional[str] = None,
+    intervention_id: Optional[str] = None,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    """Retrieves impact assessments with optional filtering by ward or intervention."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = "SELECT * FROM impact_assessments WHERE 1=1"
+    params: List[Any] = []
+
+    if ward_id:
+        query += " AND ward_id = ?"
+        params.append(ward_id.strip().upper())
+    if intervention_id:
+        query += " AND intervention_id = ?"
+        params.append(intervention_id.strip())
+
+    query += " ORDER BY updated_at DESC LIMIT ?;"
+    params.append(limit)
+
+    cursor.execute(query, tuple(params))
+    rows = cursor.fetchall()
+    conn.close()
+    return [_row_to_assessment_dict(r) for r in rows]
+
+
+def get_impact_assessment_history(assessment_id: str) -> List[Dict[str, Any]]:
+    """Retrieves the complete audit history of all previous versions for an assessment ID."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT o.*, w.name as ward_name 
-    FROM outcome_records o
-    JOIN wards w ON o.ward_id = w.id
-    ORDER BY o.record_date DESC, o.id DESC
-    LIMIT ?;
-    """, (limit,))
-    rows = [dict(row) for row in cursor.fetchall()]
+    SELECT history_id, assessment_id, version, snapshot_json, archived_at, change_reason
+    FROM impact_assessment_history
+    WHERE assessment_id = ?
+    ORDER BY version ASC;
+    """, (assessment_id,))
+    rows = cursor.fetchall()
     conn.close()
-    return rows
+
+    history: List[Dict[str, Any]] = []
+    for r in rows:
+        item = dict(r)
+        try:
+            item["snapshot"] = json.loads(item["snapshot_json"])
+        except Exception:
+            item["snapshot"] = {}
+        del item["snapshot_json"]
+        history.append(item)
+    return history
 
 
 # Auto-initialize and seed when module loaded
 init_db()
 seed_baseline_data()
+
