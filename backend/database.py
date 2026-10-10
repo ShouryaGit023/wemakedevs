@@ -8,6 +8,7 @@ and Optimization audit history.
 import sqlite3
 import os
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 
@@ -305,6 +306,38 @@ def init_db() -> None:
     );
     """)
 
+    # 15. Action Centre: Intervention Evidence Verifications
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS action_verifications (
+        verification_id TEXT PRIMARY KEY,
+        action_id TEXT NOT NULL,
+        ward_id TEXT NOT NULL,
+        overall_status TEXT NOT NULL,
+        checklist_json TEXT NOT NULL,
+        verified_by TEXT NOT NULL,
+        verified_at TEXT NOT NULL,
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    # 16. Action Centre: Action Audit Trail & Event Log
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS action_audit_events (
+        event_id TEXT PRIMARY KEY,
+        action_id TEXT NOT NULL,
+        ward_id TEXT,
+        event_type TEXT NOT NULL,
+        old_status TEXT,
+        new_status TEXT,
+        actor TEXT NOT NULL,
+        reason TEXT,
+        metadata_json TEXT,
+        timestamp TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
     # Indices for relational query performance
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_predictions_ward ON predictions (ward_id, timestamp);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_pred ON recommendations (prediction_id);")
@@ -321,6 +354,8 @@ def init_db() -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_impact_assessments_ward ON impact_assessments (ward_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_impact_assessments_interv ON impact_assessments (intervention_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_impact_history_assessment ON impact_assessment_history (assessment_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_action_verif_action ON action_verifications (action_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_action_id ON action_audit_events (action_id);")
 
     conn.commit()
     conn.close()
@@ -715,6 +750,135 @@ def get_impact_assessment_history(assessment_id: str) -> List[Dict[str, Any]]:
         del item["snapshot_json"]
         history.append(item)
     return history
+
+
+def record_action_verification(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Records an intervention evidence verification in SQLite."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    verification_id = data.get("verification_id") or f"VERIF-{uuid.uuid4().hex[:8].upper()}"
+    checklist_json = json.dumps(data.get("checklist", []))
+    now = datetime.now(timezone.utc).isoformat()
+    verified_at = data.get("verified_at") or now
+
+    cursor.execute("""
+    INSERT OR REPLACE INTO action_verifications (
+        verification_id, action_id, ward_id, overall_status, checklist_json, verified_by, verified_at, notes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    """, (
+        verification_id,
+        data["action_id"],
+        data["ward_id"],
+        data["overall_status"],
+        checklist_json,
+        data.get("verified_by", "Municipal Incident Commander"),
+        verified_at,
+        data.get("notes"),
+    ))
+    conn.commit()
+    conn.close()
+
+    result = dict(data)
+    result["verification_id"] = verification_id
+    result["verified_at"] = verified_at
+    return result
+
+
+def get_action_verification(action_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves the latest verification report for an action ID."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT verification_id, action_id, ward_id, overall_status, checklist_json, verified_by, verified_at, notes, created_at
+    FROM action_verifications
+    WHERE action_id = ?
+    ORDER BY verified_at DESC LIMIT 1;
+    """, (action_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    res = dict(row)
+    try:
+        res["checklist"] = json.loads(res["checklist_json"])
+    except Exception:
+        res["checklist"] = []
+    del res["checklist_json"]
+    return res
+
+
+def record_action_audit_event(
+    action_id: str,
+    event_type: str,
+    actor: str,
+    ward_id: Optional[str] = None,
+    old_status: Optional[str] = None,
+    new_status: Optional[str] = None,
+    reason: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    timestamp: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Records an immutable audit event for an action (creation, verification, status change, dispatch, blocker)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    event_id = f"EVT-{uuid.uuid4().hex[:8].upper()}"
+    ts = timestamp or datetime.now(timezone.utc).isoformat()
+    meta_json = json.dumps(metadata or {})
+
+    cursor.execute("""
+    INSERT INTO action_audit_events (
+        event_id, action_id, ward_id, event_type, old_status, new_status, actor, reason, metadata_json, timestamp
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """, (
+        event_id, action_id, ward_id, event_type, old_status, new_status, actor, reason, meta_json, ts
+    ))
+    conn.commit()
+    conn.close()
+
+    return {
+        "event_id": event_id,
+        "action_id": action_id,
+        "ward_id": ward_id,
+        "event_type": event_type,
+        "old_status": old_status,
+        "new_status": new_status,
+        "actor": actor,
+        "reason": reason,
+        "metadata": metadata or {},
+        "timestamp": ts,
+    }
+
+
+def list_action_audit_events(action_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """Retrieves immutable audit events, optionally filtered by action_id."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    if action_id:
+        cursor.execute("""
+        SELECT event_id, action_id, ward_id, event_type, old_status, new_status, actor, reason, metadata_json, timestamp, created_at
+        FROM action_audit_events
+        WHERE action_id = ?
+        ORDER BY timestamp ASC, created_at ASC LIMIT ?;
+        """, (action_id, limit))
+    else:
+        cursor.execute("""
+        SELECT event_id, action_id, ward_id, event_type, old_status, new_status, actor, reason, metadata_json, timestamp, created_at
+        FROM action_audit_events
+        ORDER BY timestamp DESC, created_at DESC LIMIT ?;
+        """, (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    results = []
+    for r in rows:
+        item = dict(r)
+        try:
+            item["metadata"] = json.loads(item["metadata_json"])
+        except Exception:
+            item["metadata"] = {}
+        del item["metadata_json"]
+        results.append(item)
+    return results
 
 
 # Auto-initialize and seed when module loaded

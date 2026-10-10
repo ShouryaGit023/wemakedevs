@@ -99,6 +99,9 @@ from backend.action_centre import (
     ACTION_TYPES,
     VALID_STATUSES,
     HUMAN_APPROVAL_NOTICE as ACTION_CENTRE_ADVISORY,
+    verify_intervention_evidence,
+    get_action_verification_report,
+    dispatch_quick_action,
 )
 from backend.impact_verification import (
     ImpactVerificationRequest,
@@ -118,7 +121,7 @@ from backend.impact_verification import (
     QualityStatus,
     ATTRIBUTION_DISCLAIMER
 )
-from backend.database import DuplicateAssessmentError
+from backend.database import DuplicateAssessmentError, list_action_audit_events
 
 
 app = FastAPI(
@@ -1521,9 +1524,32 @@ async def rollback_version_endpoint(version_id: str, req: ProposalApprovalReques
 # -------------------------------------------------------------
 
 class ActionStatusUpdateRequest(BaseModel):
-    new_status: str = Field(..., description=f"Target status. Must be one of: {VALID_STATUSES}")
-    changed_by: str = Field("operator", description="Identity of the person/system making the change")
-    notes: Optional[str] = Field(None, description="Optional notes about the status change")
+    new_status: str = Field(..., description="Target status. Must be one of: proposed, approved, in_progress, completed, cancelled, rejected, blocked, changes_requested")
+    changed_by: str = Field("Municipal Incident Commander", description="Identity or role of authorizing officer")
+    notes: Optional[str] = Field(None, description="Operational notes or mandatory justification reason")
+    reason: Optional[str] = Field(None, description="Alias for notes (justification reason)")
+
+
+class ActionDecisionRequest(BaseModel):
+    decision: str = Field(..., description="Decision action: approve, reject, hold, block, unblock, request_changes, deploy, complete, cancel")
+    changed_by: str = Field("Municipal Incident Commander", description="Authorizing municipal official or role")
+    notes: Optional[str] = Field(None, description="Operational justification or review notes")
+    reason: Optional[str] = Field(None, description="Mandatory reason for rejection, blocking, or change requests")
+    target_status: Optional[str] = Field(None, description="Optional target status override (used for unblock)")
+
+
+class QuickDispatchRequest(BaseModel):
+    ward_id: str = Field(..., description="Target AMC ward identifier (e.g. W1, Danilimda)")
+    ward_name: Optional[str] = Field(None, description="Optional display name")
+    action_type: str = Field(..., description="Action type identifier")
+    priority: str = Field("critical", description="Priority tier")
+    reason: str = Field(..., description="Operational justification for dispatch")
+    required_resources: Optional[Dict[str, Any]] = Field(None, description="Resource schedule: cost_inr, crew_required, water_required_l")
+    related_hazard: Optional[str] = Field(None, description="Hazard category")
+    risk_score: Optional[float] = Field(None, description="Associated risk score")
+    authorized_by: str = Field("Municipal Incident Commander", description="Authorizing officer name/role")
+    initial_status: str = Field("in_progress", description="Initial operational status: approved or in_progress")
+    force: bool = Field(False, description="Override duplicate check if emergency dispatch required")
 
 
 class ManualActionRequest(BaseModel):
@@ -1715,7 +1741,7 @@ def update_action_status(action_id: str, req: ActionStatusUpdateRequest):
     """
     Updates the status of an existing action. Enforces valid state transitions:
     proposed → approved → in_progress → completed
-    Any non-terminal state → cancelled
+    Any non-terminal state → cancelled / blocked / rejected
     """
     store = get_action_store()
     try:
@@ -1723,7 +1749,7 @@ def update_action_status(action_id: str, req: ActionStatusUpdateRequest):
             action_id=action_id,
             new_status=req.new_status,
             changed_by=req.changed_by,
-            notes=req.notes,
+            notes=req.notes or req.reason,
         )
         return {"status": "SUCCESS", "action": updated}
     except KeyError:
@@ -1733,6 +1759,198 @@ def update_action_status(action_id: str, req: ActionStatusUpdateRequest):
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/api/action-centre/actions/{action_id}/decision")
+def execute_action_decision_endpoint(action_id: str, req: ActionDecisionRequest):
+    """
+    Executes an operational decision (approve, reject, hold/block, unblock, request_changes, deploy, complete)
+    with permission enforcement, verification validation, and mandatory justification logging.
+    """
+    store = get_action_store()
+    decision_norm = req.decision.strip().lower()
+
+    action = store.get_action(action_id)
+    if not action:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Action '{action_id}' not found in the Action Centre."
+        )
+
+    current_status = action.get("status", "proposed")
+    notes = (req.notes or req.reason or "").strip()
+
+    # Map decision to target status
+    if decision_norm in ["approve", "approved"]:
+        target_status = "approved"
+    elif decision_norm in ["reject", "rejected"]:
+        target_status = "rejected"
+    elif decision_norm in ["hold", "block", "blocked"]:
+        target_status = "blocked"
+    elif decision_norm in ["unblock", "unblocked"]:
+        target_status = req.target_status if req.target_status in ["proposed", "approved", "in_progress"] else "proposed"
+        if not notes:
+            notes = "Unblocked by authorizing municipal authority."
+    elif decision_norm in ["request_changes", "request-changes", "changes_requested"]:
+        target_status = "changes_requested"
+    elif decision_norm in ["deploy", "in_progress"]:
+        target_status = "in_progress"
+    elif decision_norm in ["complete", "completed", "resolve"]:
+        target_status = "completed"
+    elif decision_norm in ["cancel", "cancelled"]:
+        target_status = "cancelled"
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid decision '{req.decision}'. Supported: approve, reject, hold/block, unblock, request_changes, deploy, complete, cancel"
+        )
+
+    try:
+        updated = store.update_status(
+            action_id=action_id,
+            new_status=target_status,
+            changed_by=req.changed_by,
+            notes=notes if notes else None,
+        )
+        return {
+            "status": "SUCCESS",
+            "decision": decision_norm,
+            "action": updated,
+            "message": f"Action {action_id} successfully transitioned from '{current_status}' to '{target_status}'.",
+        }
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Action '{action_id}' not found in the Action Centre."
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/api/action-centre/dispatch/quick")
+def quick_dispatch_endpoint(req: QuickDispatchRequest):
+    """
+    Executes an authenticated operational quick dispatch:
+    - Verifies AMC ward jurisdiction
+    - Performs duplicate-dispatch check against active operations
+    - Enforces municipal authority authorization
+    - Persists action and immutable audit event to SQLite
+    - Never simulates dispatch
+    """
+    try:
+        result = dispatch_quick_action(
+            ward_id=req.ward_id,
+            action_type=req.action_type,
+            authorized_by=req.authorized_by,
+            ward_name=req.ward_name,
+            priority=req.priority,
+            reason=req.reason,
+            required_resources=req.required_resources,
+            related_hazard=req.related_hazard,
+            risk_score=req.risk_score,
+            initial_status=req.initial_status,
+            force=req.force,
+        )
+        return result
+    except ValueError as e:
+        err_msg = str(e)
+        if "duplicate" in err_msg.lower():
+            raise HTTPException(status_code=409, detail=err_msg)
+        raise HTTPException(status_code=422, detail=err_msg)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Quick dispatch failed: {str(e)}")
+
+
+@app.get("/api/action-centre/actions/{action_id}/audit-trail")
+def get_action_audit_trail_endpoint(action_id: str, limit: int = Query(50, ge=1, le=200)):
+    """
+    Retrieves the complete immutable audit trail for a specific action from SQLite:
+    creation, reviews, verifications, decisions, dispatches, and status changes.
+    """
+    events = list_action_audit_events(action_id=action_id, limit=limit)
+    return {
+        "status": "SUCCESS",
+        "action_id": action_id,
+        "total_events": len(events),
+        "audit_trail": events,
+    }
+
+
+@app.get("/api/action-centre/audit-trail")
+def get_global_action_audit_trail_endpoint(limit: int = Query(100, ge=1, le=500)):
+    """
+    Retrieves global municipal operational audit trail across all interventions:
+    dispatches, decisions, verification results, and status changes with timestamps and actors.
+    """
+    events = list_action_audit_events(action_id=None, limit=limit)
+    return {
+        "status": "SUCCESS",
+        "total_events": len(events),
+        "audit_trail": events,
+    }
+
+
+class ActionVerificationRequest(BaseModel):
+    verified_by: str = Field("Municipal Incident Commander", description="Officer identity conducting verification")
+    notes: Optional[str] = Field(None, description="Optional verification notes")
+
+
+@app.post("/api/action-centre/actions/{action_id}/verify")
+async def verify_action_evidence_endpoint(action_id: str, req: Optional[ActionVerificationRequest] = None):
+    """
+    Validates an intervention against actual data:
+    1. Ward association (jurisdiction in AMC registry)
+    2. Quantitative risk assessment (substantiated by risk engine)
+    3. Data freshness (within operational SLA threshold)
+    4. Operational details & resource constraints (valid type, priority, positive resources)
+    5. Empirical physical evidence (sensor readings if attached, or clearly unavailable)
+
+    Enforces:
+    - Never fabricates evidence or readings.
+    - Prevents mandatory failed checks from succeeding.
+    - Persists verification report to SQLite database.
+    """
+    store = get_action_store()
+    action = store.get_action(action_id)
+    if not action:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Action '{action_id}' not found in the Action Centre."
+        )
+
+    climate_data = None
+    try:
+        climate_data = await get_cached_or_fresh_combined_climate_risk()
+    except Exception:
+        climate_data = None
+
+    verified_by = req.verified_by if req else "Municipal Incident Commander"
+    notes = req.notes if req else None
+
+    result = verify_intervention_evidence(
+        action=action,
+        climate_risk_data=climate_data,
+        verified_by=verified_by,
+        notes=notes,
+        store=store,
+    )
+    return {"status": "SUCCESS", "verification": result}
+
+
+@app.get("/api/action-centre/actions/{action_id}/verification")
+def get_action_verification_endpoint(action_id: str):
+    """
+    Retrieves the latest verification report or default checklist for an action.
+    """
+    store = get_action_store()
+    try:
+        report = get_action_verification_report(action_id, store=store)
+        return {"status": "SUCCESS", "verification": report}
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Action '{action_id}' not found in the Action Centre."
+        )
 
 
 @app.post("/api/action-centre/create")

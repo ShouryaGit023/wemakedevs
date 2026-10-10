@@ -146,16 +146,67 @@ export const ClimateShieldAPI = {
     return request(`/api/action-centre/actions/prioritized${qs}`);
   },
 
-  // 10. Update Action Status (proposed -> approved -> in_progress -> completed / cancelled)
-  async updateActionStatus(actionId, { new_status, changed_by = 'Municipal Operator', notes = null }) {
+  // 9b. Retrieve Single Action Details
+  async getActionById(actionId) {
+    return request(`/api/action-centre/actions/${encodeURIComponent(actionId)}`);
+  },
+
+  // 9c. Verify Action Evidence
+  async verifyActionEvidence(actionId, payload = {}) {
+    return request(`/api/action-centre/actions/${encodeURIComponent(actionId)}/verify`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  // 9d. Get Action Verification Report
+  async getActionVerification(actionId) {
+    return request(`/api/action-centre/actions/${encodeURIComponent(actionId)}/verification`);
+  },
+
+  // 10. Update Action Status (proposed -> approved -> in_progress -> completed / cancelled / blocked / rejected / changes_requested)
+  async updateActionStatus(actionId, { new_status, changed_by = 'Municipal Incident Commander', notes = null, reason = null }) {
     return request(`/api/action-centre/actions/${encodeURIComponent(actionId)}/status`, {
       method: 'PUT',
       body: JSON.stringify({
         new_status,
         changed_by,
-        notes,
+        notes: notes || reason,
+        reason,
       }),
     });
+  },
+
+  // 10b. Execute Decision Workflow (approve, reject, hold/block, unblock, request_changes, deploy, complete)
+  async executeActionDecision(actionId, { decision, changed_by = 'Municipal Incident Commander', notes = null, reason = null, target_status = null }) {
+    return request(`/api/action-centre/actions/${encodeURIComponent(actionId)}/decision`, {
+      method: 'POST',
+      body: JSON.stringify({
+        decision,
+        changed_by,
+        notes: notes || reason,
+        reason,
+        target_status,
+      }),
+    });
+  },
+
+  // 10c. Authenticated Operational Quick Dispatch with Duplicate Prevention
+  async quickDispatch(payload) {
+    return request('/api/action-centre/dispatch/quick', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  // 10d. Action-Specific Audit Trail
+  async getActionAuditTrail(actionId, limit = 50) {
+    return request(`/api/action-centre/actions/${encodeURIComponent(actionId)}/audit-trail?limit=${limit}`);
+  },
+
+  // 10e. Global Action Centre Audit Trail
+  async getGlobalActionAuditTrail(limit = 100) {
+    return request(`/api/action-centre/audit-trail?limit=${limit}`);
   },
 
   // 11. Create Manual Operational Action
